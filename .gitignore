@@ -1,0 +1,22 @@
+# ==========================================
+# YATIRIM TAKİP — .gitignore
+# ==========================================
+
+# Sanal ortam (her bilgisayarda ayrı kurulur, GitHub'a gerek yok)
+.venv/
+venvs/
+
+# Gizli bilgiler — TURSO token'ı burada, KESİNLİKLE paylaşılmamalı
+.env
+TURSO_INFO/
+
+# Python derleme dosyaları
+__pycache__/
+*.pyc
+
+# Yerel veritabanı dosyaları (artık Turso'da, GitHub'a gerek yok)
+*.db
+*.db-journal
+
+# Streamlit yerel ayarları
+.streamlit/
