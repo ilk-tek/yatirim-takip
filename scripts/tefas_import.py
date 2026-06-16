@@ -1,51 +1,118 @@
 # ==========================================
 # TEFAS FON VERİLERİ IMPORT  (Turso sürümü)
 # ==========================================
+# data/tefas/ klasöründeki TÜM CSV dosyalarını okur
+# ve portföydeki fonların fiyatlarını fiyat_gecmisi tablosuna yazar.
+#
+# KULLANIM (proje kök klasöründen):
+#   python scripts/tefas_import.py
+#
+# TEFAS'tan aylık CSV dosyaları indirip data/tefas/ klasörüne koyun.
+# Dosya adı önemli değil — klasördeki tüm .csv dosyaları okunur.
+# Aynı tarih+fon çifti birden fazla dosyada olsa bile duplikasyon OLMAZ
+# (UNIQUE kısıtı + INSERT OR IGNORE sayesinde).
+# ==========================================
+
 import os
+import glob
 import pandas as pd
 
 from db import baglan, senkronize_et
 
-# --- Dosya yolu ---
-CSV_YOLU = "data/tefas/tefas_fon_verileri.csv"
+# --- Klasör yolu ---
+CSV_KLASORU = "data/tefas"
 
-def tefas_import():
-    # Dosya var mı kontrol et
-    if not os.path.exists(CSV_YOLU):
-        print(f"HATA: {CSV_YOLU} bulunamadı!")
-        return
 
-    # --- CSV'yi oku ---
-    # İlk 3 satır başlık bilgisi, 4. satırdan itibaren veri
-    df = pd.read_csv(
-        CSV_YOLU,
-        skiprows=3,          # ilk 3 satırı atla
-        encoding="utf-8-sig",
-        sep=","
-    )
+def tek_csv_oku(dosya_yolu):
+    """
+    Tek bir TEFAS CSV dosyasını okur, temizler ve DataFrame döndürür.
 
-    print(f"CSV okundu: {len(df)} satır")
-    print(f"Sütunlar: {df.columns.tolist()}")
-    print(df.head(3))
+    TEFAS CSV formatı:
+      - İlk 3 satır başlık/açıklama (atlanır)
+      - Sütunlar: fon_kodu, fon_adi, tarih, fiyat, tedavul, kisi_sayisi, toplam_deger
+      - Fiyat: Türk formatı (nokta=binlik, virgül=ondalık) → "3.290,435" → 3290.435
+      - Tarih: "01.06.2026" → "2026-06-01"
+    """
+    try:
+        df = pd.read_csv(
+            dosya_yolu,
+            skiprows=3,
+            encoding="utf-8-sig",
+            sep=","
+        )
+    except Exception as e:
+        print(f"  ❌ Okunamadı: {dosya_yolu} — {e}")
+        return pd.DataFrame()
 
-    # --- Sütun adlarını düzenle ---
+    # Bazı dosyalar boş olabilir
+    if df.empty or len(df.columns) < 4:
+        print(f"  ⚠️ Boş veya geçersiz: {dosya_yolu}")
+        return pd.DataFrame()
+
+    # Sütun adlarını standartlaştır
     df.columns = ["fon_kodu", "fon_adi", "tarih", "fiyat",
                   "tedavul", "kisi_sayisi", "toplam_deger"]
 
-    # --- Fiyat sütununu temizle ---
-    # Virgülü noktaya çevir: "3,290435" → 3.290435
+    # Fiyat sütununu temizle: "3.290,435" → 3290.435
     df["fiyat"] = df["fiyat"].astype(str).str.replace(".", "", regex=False)
     df["fiyat"] = df["fiyat"].str.replace(",", ".", regex=False)
     df["fiyat"] = pd.to_numeric(df["fiyat"], errors="coerce")
 
-    # --- Tarihi düzenle ---
-    # "01.06.2026" → "2026-06-01"
+    # Tarihi düzenle: "01.06.2026" → "2026-06-01"
     df["tarih"] = pd.to_datetime(df["tarih"], format="%d.%m.%Y").dt.strftime("%Y-%m-%d")
 
-    print(f"\nTemizlendi. Örnek fiyatlar:")
-    print(df[["fon_kodu", "tarih", "fiyat"]].head(5))
+    # Geçersiz fiyatları at
+    df = df.dropna(subset=["fiyat"])
 
-    # --- Veritabanına bağlan (Turso) ---
+    return df[["fon_kodu", "tarih", "fiyat"]]
+
+
+def tefas_import():
+    """
+    data/tefas/ klasöründeki TÜM CSV dosyalarını okur ve
+    portföydeki fonların fiyatlarını veritabanına yazar.
+
+    Duplikasyon koruması:
+      - fiyat_gecmisi tablosunda UNIQUE(varlik_id, tarih) kısıtı var
+      - INSERT OR IGNORE ile aynı kayıt tekrar eklenmez
+      - Yani aynı tarihi içeren 10 farklı CSV koysan bile sorun olmaz
+    """
+    # Klasör var mı?
+    if not os.path.exists(CSV_KLASORU):
+        print(f"HATA: {CSV_KLASORU} klasörü bulunamadı!")
+        print(f"Lütfen klasörü oluşturup TEFAS CSV dosyalarını içine koyun.")
+        return
+
+    # Klasördeki tüm CSV dosyalarını bul
+    csv_dosyalari = sorted(glob.glob(os.path.join(CSV_KLASORU, "*.csv")))
+
+    if not csv_dosyalari:
+        print(f"UYARI: {CSV_KLASORU} klasöründe CSV dosyası bulunamadı!")
+        return
+
+    print(f"📂 {len(csv_dosyalari)} CSV dosyası bulundu:")
+    for dosya in csv_dosyalari:
+        print(f"   • {os.path.basename(dosya)}")
+
+    # --- Tüm CSV'leri oku ve birleştir ---
+    tum_veri = []
+    for dosya in csv_dosyalari:
+        df = tek_csv_oku(dosya)
+        if not df.empty:
+            tum_veri.append(df)
+            print(f"  ✅ {os.path.basename(dosya)}: {len(df)} satır")
+
+    if not tum_veri:
+        print("\nHiçbir CSV'den veri okunamadı.")
+        return
+
+    # Birleştir ve duplikatları at (aynı fon+tarih birden fazla dosyada olabilir)
+    birlesik = pd.concat(tum_veri, ignore_index=True)
+    birlesik = birlesik.drop_duplicates(subset=["fon_kodu", "tarih"], keep="last")
+
+    print(f"\nToplam: {len(birlesik)} benzersiz fon-tarih kaydı")
+
+    # --- Veritabanına bağlan ---
     conn = baglan()
     c = conn.cursor()
 
@@ -53,22 +120,22 @@ def tefas_import():
     c.execute("SELECT id, kod FROM varliklar WHERE tur IN ('Yatırım Fonu', 'BES Fonu')")
     portfoy_fonlar = {row[1]: row[0] for row in c.fetchall()}
 
-    print(f"\nPortföydeki fonlar: {list(portfoy_fonlar.keys())}")
+    print(f"Portföydeki fonlar: {list(portfoy_fonlar.keys())}")
 
     if not portfoy_fonlar:
         print("Portföyde fon bulunamadı. Önce fon varlığı ekleyin.")
         return
 
-    # --- Eklemeden ÖNCE toplam kayıt sayısı (doğru sayım için) ---
+    # --- Eklemeden ÖNCE toplam kayıt sayısı ---
     onceki_toplam = c.execute("SELECT COUNT(*) FROM fiyat_gecmisi").fetchone()[0]
     islenen = 0
 
     # --- Sadece portföydeki fonları filtrele ve kaydet ---
     for fon_kodu, varlik_id in portfoy_fonlar.items():
-        fon_df = df[df["fon_kodu"] == fon_kodu]
+        fon_df = birlesik[birlesik["fon_kodu"] == fon_kodu]
 
         if fon_df.empty:
-            print(f"UYARI: {fon_kodu} TEFAS verisinde bulunamadı!")
+            # Bu fon bu CSV'lerde yok — sessizce atla
             continue
 
         for _, row in fon_df.iterrows():
@@ -89,13 +156,14 @@ def tefas_import():
     eklenen = sonraki_toplam - onceki_toplam
     atlanan = islenen - eklenen
 
-    # Değişiklikleri buluta gönder
+    # Buluta gönder
     senkronize_et()
 
-    print(f"\nTamamlandı!")
+    print(f"\n✅ Tamamlandı!")
     print(f"  İşlenen satır : {islenen}")
-    print(f"  Eklenen kayıt : {eklenen}")
+    print(f"  Eklenen kayıt : {eklenen} (yeni)")
     print(f"  Atlanan kayıt : {atlanan} (zaten vardı)")
+
 
 if __name__ == "__main__":
     tefas_import()

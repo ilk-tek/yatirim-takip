@@ -121,6 +121,59 @@ def veritabani_olustur():
         )
     """)
 
+    # --- Portföy seviyesinde aylık nakit akışları ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfoy_akislari (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            yil       INTEGER NOT NULL,
+            ay        INTEGER NOT NULL,
+            dis_giris REAL DEFAULT 0,
+            dis_cikis REAL DEFAULT 0,
+            notlar    TEXT,
+            UNIQUE(yil, ay)
+        )
+    """)
+
+    # --- Aracı kurumlar listesi ---
+    # İşlem ekle/düzenle sayfalarında dropdown olarak kullanılır.
+    # Kullanıcı yeni aracı kurum ekleyebilir.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS araci_kurumlar (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            ad   TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    # Varsayılan aracı kurumlar (yoksa ekle)
+    varsayilan_araci = [
+        "İş Yatırım", "İş Bankası", "YKB", "Anadolubank",
+        "Ata Yatırım", "Garanti BBVA", "Akbank", "Kiralık Kasa", "Midas"
+    ]
+    for araci in varsayilan_araci:
+        cursor.execute(
+            "INSERT OR IGNORE INTO araci_kurumlar (ad) VALUES (?)", (araci,)
+        )
+
+    # --- Portföy etiketleri listesi ---
+    # İşlem ekle/düzenle sayfalarında dropdown olarak kullanılır.
+    # Kullanıcı yeni etiket ekleyebilir.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfoy_etiketleri (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            ad   TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    # Varsayılan portföy etiketleri (yoksa ekle)
+    varsayilan_etiket = [
+        "Yatırım", "Defans", "Atak", "YP Fon",
+        "Arbitraj", "Emtia", "Uzun Borçlanma", "M"
+    ]
+    for etiket in varsayilan_etiket:
+        cursor.execute(
+            "INSERT OR IGNORE INTO portfoy_etiketleri (ad) VALUES (?)", (etiket,)
+        )
+
     baglanti.commit()
     senkronize_et()
     print("Veritabanı tabloları hazır.")
