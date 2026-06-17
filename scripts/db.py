@@ -61,10 +61,9 @@ def baglan():
                 f"Lütfen şu dosyayı doldurun: {PROJE_KOKU / '.env'}"
             )
         _baglanti = libsql.connect(
-            LOKAL_REPLIKA,
-            sync_url=TURSO_URL,
-            auth_token=TURSO_TOKEN,
-            _check_same_thread=False,   # Streamlit farklı thread'lerden çağırabilir
+            LOKAL_REPLIKA,       # yerel kopya dosyası
+            sync_url=TURSO_URL,  # Turso bulut adresi
+            auth_token=TURSO_TOKEN,  # Turso erişim anahtarı
         )
     return _baglanti
 
