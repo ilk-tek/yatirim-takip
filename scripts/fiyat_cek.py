@@ -1,8 +1,9 @@
 # ============================================================
-# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST Hisse + Fiziki Altın
+# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST Hisse + Kripto + Fiziki Altın
 # ============================================================
 # Yabancı hisse fiyatlarını Yahoo Finance'tan,
 # BIST hisse fiyatlarını Yahoo Finance'tan (.IS suffix ile),
+# kripto varlık fiyatlarını Yahoo Finance'tan (-USD suffix ile),
 # fiziki altın fiyatlarını ons altın fiyatından hesaplayarak
 # fiyat_gecmisi tablosuna yazar.
 #
@@ -11,6 +12,7 @@
 #   python scripts/fiyat_cek.py --baslangic 2021-01-01 -> geçmişe dönük
 #   python scripts/fiyat_cek.py --sadece-hisse
 #   python scripts/fiyat_cek.py --sadece-bist
+#   python scripts/fiyat_cek.py --sadece-kripto
 #   python scripts/fiyat_cek.py --sadece-altin
 #   python scripts/fiyat_cek.py --sadece-bist --baslangic 2022-03-01
 #
@@ -84,9 +86,11 @@ def hisse_fiyatlari_cek(baslangic_tarihi=None):
 
     bugun_str = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     toplam_eklenen = 0
+    toplam_varlik = len(varliklar)
 
-    for varlik_id, kod, ad, para_birimi in varliklar:
+    for sira, (varlik_id, kod, ad, para_birimi) in enumerate(varliklar, 1):
         try:
+            print(f"  ⏳ ({sira}/{toplam_varlik}) {kod} çekiliyor...")
             ticker = yf.Ticker(kod)
 
             if baslangic_tarihi:
@@ -180,9 +184,11 @@ def bist_fiyatlari_cek(baslangic_tarihi=None):
 
     bugun_str = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     toplam_eklenen = 0
+    toplam_varlik = len(varliklar)
 
-    for varlik_id, kod, ad, para_birimi in varliklar:
+    for sira, (varlik_id, kod, ad, para_birimi) in enumerate(varliklar, 1):
         try:
+            print(f"  ⏳ ({sira}/{toplam_varlik}) {kod} çekiliyor...")
             # BIST sembolleri Yahoo'da ".IS" ile aranır
             yahoo_sembol = f"{kod}.IS"
             ticker = yf.Ticker(yahoo_sembol)
@@ -223,6 +229,103 @@ def bist_fiyatlari_cek(baslangic_tarihi=None):
             else:
                 son_fiyat = float(veri["Close"].iloc[-1])
                 print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {son_fiyat:.2f} TRY")
+
+        except Exception as e:
+            print(f"  ❌ {kod} hatası: {e}")
+            try:
+                baglanti.commit()
+            except Exception:
+                pass
+
+    senkronize_et()
+    return toplam_eklenen
+
+
+# ============================================================
+# KRİPTO VARLIK FİYATLARI
+# ============================================================
+# Yahoo Finance'ta kripto varlıklar "-USD" suffix'i ile listelenir.
+# Örnek: BTC → BTC-USD, XRP → XRP-USD, DOGE → DOGE-USD
+# Fiyatlar USD cinsindendir.
+# ============================================================
+
+def kripto_fiyatlari_cek(baslangic_tarihi=None):
+    """
+    Kripto türündeki varlıklar için fiyatları Yahoo Finance'tan çeker.
+
+    Yahoo Finance'ta kripto sembolleri "-USD" ile biter:
+      BTC → BTC-USD, XRP → XRP-USD, XLM → XLM-USD, DOGE → DOGE-USD
+
+    baslangic_tarihi verilirse → o tarihten bugüne günlük fiyatlar (geçmiş veri)
+    baslangic_tarihi None ise  → sadece bugünkü fiyat (hızlı güncelleme)
+
+    Fiyatlar USD cinsinden kaydedilir (Yahoo zaten USD olarak döndürür).
+    """
+    baglanti = baglan()
+    cursor = baglanti.cursor()
+
+    # Veritabanından Kripto türündeki varlıkları al
+    cursor.execute("""
+        SELECT id, kod, ad, para_birimi FROM varliklar WHERE tur = 'Kripto'
+    """)
+    varliklar = cursor.fetchall()
+
+    if not varliklar:
+        print("\n[KRİPTO] Veritabanında Kripto varlığı yok, atlanıyor.")
+        return 0
+
+    if baslangic_tarihi:
+        print(f"\n[KRİPTO] Yahoo Finance'tan geçmiş veriler çekiliyor ({baslangic_tarihi} → bugün)...")
+    else:
+        print("\n[KRİPTO] Yahoo Finance'tan güncel fiyatlar çekiliyor...")
+
+    bugun_str = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    toplam_eklenen = 0
+    toplam_varlik = len(varliklar)
+
+    for sira, (varlik_id, kod, ad, para_birimi) in enumerate(varliklar, 1):
+        try:
+            print(f"  ⏳ ({sira}/{toplam_varlik}) {kod} çekiliyor...")
+            # Kripto sembolleri Yahoo'da "-USD" ile aranır
+            yahoo_sembol = f"{kod}-USD"
+            ticker = yf.Ticker(yahoo_sembol)
+
+            if baslangic_tarihi:
+                veri = ticker.history(
+                    start=baslangic_tarihi,
+                    end=bugun_str,
+                    auto_adjust=False
+                )
+            else:
+                veri = ticker.history(period="1d", auto_adjust=False)
+
+            if veri.empty:
+                print(f"  ⚠️ {kod} ({yahoo_sembol}) için veri bulunamadı")
+                continue
+
+            eklenen = 0
+            for tarih_idx, satir in veri.iterrows():
+                tarih_str = tarih_idx.strftime("%Y-%m-%d")
+                try:
+                    fiyat = float(satir["Close"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+
+                cursor.execute("""
+                    INSERT OR REPLACE INTO fiyat_gecmisi (varlik_id, tarih, fiyat, kaynak)
+                    VALUES (?, ?, ?, 'yahoo-kripto')
+                """, (varlik_id, tarih_str, round(fiyat, 6)))
+                eklenen += 1
+
+            # Her kripto sonrası commit (Turso bağlantı kopmasını önler)
+            baglanti.commit()
+            toplam_eklenen += eklenen
+
+            if baslangic_tarihi:
+                print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {eklenen} gün fiyat eklendi")
+            else:
+                son_fiyat = float(veri["Close"].iloc[-1])
+                print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {son_fiyat:.6f} USD")
 
         except Exception as e:
             print(f"  ❌ {kod} hatası: {e}")
@@ -387,20 +490,21 @@ def altin_fiyatlari_cek(baslangic_tarihi=None):
 # ============================================================
 
 def tum_fiyatlari_cek(baslangic_tarihi=None):
-    """Yabancı hisse, BIST hisse ve altın fiyatlarını çeker."""
+    """Yabancı hisse, BIST hisse, kripto ve altın fiyatlarını çeker."""
     if baslangic_tarihi:
         print(f"📊 Geçmiş Fiyat Güncelleme — {baslangic_tarihi} → {date.today()}")
     else:
         print(f"📊 Güncel Fiyat Güncelleme — {date.today()}")
     print("=" * 50)
 
-    hisse_sayisi = hisse_fiyatlari_cek(baslangic_tarihi)
-    bist_sayisi  = bist_fiyatlari_cek(baslangic_tarihi)
-    altin_sayisi = altin_fiyatlari_cek(baslangic_tarihi)
+    hisse_sayisi  = hisse_fiyatlari_cek(baslangic_tarihi)
+    bist_sayisi   = bist_fiyatlari_cek(baslangic_tarihi)
+    kripto_sayisi = kripto_fiyatlari_cek(baslangic_tarihi)
+    altin_sayisi  = altin_fiyatlari_cek(baslangic_tarihi)
 
-    toplam = hisse_sayisi + bist_sayisi + altin_sayisi
+    toplam = hisse_sayisi + bist_sayisi + kripto_sayisi + altin_sayisi
     print("\n" + "=" * 50)
-    print(f"TOPLAM: {hisse_sayisi} yabancı hisse + {bist_sayisi} BIST + {altin_sayisi} altın = {toplam} kayıt")
+    print(f"TOPLAM: {hisse_sayisi} yabancı hisse + {bist_sayisi} BIST + {kripto_sayisi} kripto + {altin_sayisi} altın = {toplam} kayıt")
     return toplam
 
 
@@ -416,6 +520,8 @@ if __name__ == "__main__":
         hisse_fiyatlari_cek(baslangic)
     elif "--sadece-bist" in sys.argv:
         bist_fiyatlari_cek(baslangic)
+    elif "--sadece-kripto" in sys.argv:
+        kripto_fiyatlari_cek(baslangic)
     elif "--sadece-altin" in sys.argv:
         altin_fiyatlari_cek(baslangic)
     else:

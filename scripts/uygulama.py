@@ -19,7 +19,7 @@ from hesaplamalar import (
     fifo_maliyet_hesapla, MEVDUAT_TURLERI,
     kur_getir, bugunun_kuru
 )
-from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
+from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
 
 # --- Veritabanı bağlantısı ---
@@ -240,24 +240,31 @@ if sayfa == "📊 Portföy":
             ozet_df = pd.DataFrame(ozet)
 
             # ==========================================
-            # PASTA GRAFİKLER
+            # DAĞILIM TABLOLARI (Tür + Exposure)
             # ==========================================
-            import plotly.express as px
-
             tur_dagilim = ozet_df.groupby("Tür")["Değer (TL)"].sum().reset_index()
+            tur_dagilim["Yüzde"] = (tur_dagilim["Değer (TL)"] / tur_dagilim["Değer (TL)"].sum() * 100).round(1)
+            tur_dagilim = tur_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
+            tur_dagilim["Yüzde"] = tur_dagilim["Yüzde"].apply(lambda x: f"%{x}")
+
             exp_dagilim = ozet_df.groupby("Exposure")["Değer (TL)"].sum().reset_index()
+            exp_dagilim["Yüzde"] = (exp_dagilim["Değer (TL)"] / exp_dagilim["Değer (TL)"].sum() * 100).round(1)
+            exp_dagilim = exp_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
+            exp_dagilim["Yüzde"] = exp_dagilim["Yüzde"].apply(lambda x: f"%{x}")
 
             grafik_col1, grafik_col2 = st.columns(2)
             with grafik_col1:
-                fig1 = px.pie(tur_dagilim, values="Değer (TL)", names="Tür",
-                              title="Varlık Türü Bazında Dağılım", hole=0.4)
-                fig1.update_traces(textposition="inside", textinfo="percent+label")
-                st.plotly_chart(fig1, use_container_width=True)
+                st.markdown("**Varlık Türü Bazında Dağılım**")
+                st.dataframe(
+                    tur_dagilim.style.format({"Değer (TL)": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True
+                )
             with grafik_col2:
-                fig2 = px.pie(exp_dagilim, values="Değer (TL)", names="Exposure",
-                              title="Exposure Bazında Dağılım", hole=0.4)
-                fig2.update_traces(textposition="inside", textinfo="percent+label")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.markdown("**Exposure Bazında Dağılım**")
+                st.dataframe(
+                    exp_dagilim.style.format({"Değer (TL)": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True
+                )
 
             # ==========================================
             # TOPLAM METRİKLER
@@ -267,16 +274,18 @@ if sayfa == "📊 Portföy":
             toplam_getiri = (toplam_kar / portfoy_toplam_maliyet * 100) if portfoy_toplam_maliyet else 0
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("💼 Toplam Maliyet",     f"{portfoy_toplam_maliyet:,.2f} TL")
-            col2.metric("📈 Toplam Güncel Değer", f"{toplam_deger:,.2f} TL")
-            col3.metric("💰 Toplam Kâr/Zarar",    f"{toplam_kar:,.2f} TL",
+            col1.metric("💼 Toplam Maliyet",     f"{portfoy_toplam_maliyet:,.0f} TL")
+            col2.metric("📈 Toplam Güncel Değer", f"{toplam_deger:,.0f} TL")
+            col3.metric("💰 Toplam Kâr/Zarar",    f"{toplam_kar:,.0f} TL",
                         delta=f"{toplam_getiri:.2f}%")
 
             col4, col5, col6 = st.columns(3)
-            col4.metric("💵 Maliyet (USD)",       f"${portfoy_toplam_maliyet / usd_kuru_bugun:,.2f}")
-            col5.metric("💵 Güncel Değer (USD)",   f"${toplam_deger / usd_kuru_bugun:,.2f}")
-            col6.metric("💵 Kâr/Zarar (USD)",     f"${toplam_kar / usd_kuru_bugun:,.2f}",
+            col4.metric("💵 Maliyet (USD)",       f"${portfoy_toplam_maliyet / usd_kuru_bugun:,.0f}")
+            col5.metric("💵 Güncel Değer (USD)",   f"${toplam_deger / usd_kuru_bugun:,.0f}")
+            col6.metric("💵 Kâr/Zarar (USD)",     f"${toplam_kar / usd_kuru_bugun:,.0f}",
                         delta=f"{toplam_getiri:.2f}%")
+
+            st.caption("ℹ️ Gerçekleşmemiş (unrealized) kâr/zarar. Maliyet: FIFO yöntemi, alış tarihindeki döviz kuru ile TL'ye çevrilir. Güncel Değer: adet × son fiyat × bugünkü kur.")
 
             # ==========================================
             # HİYERARŞİK EXPANDER: Aracı Kurum → Tür → Exposure + Varlık
@@ -496,7 +505,9 @@ elif sayfa == "📈 Performans":
                 goster = exp_df[["Kod", "Ad", "Tür", "PB", "TWR % (TL)", "TWR % (PB)", "Yıllık (TL)", "Yıllık (PB)", "Son Fiyat", "Güncelleme"]].copy()
                 st.dataframe(goster.style.apply(renk_exp, axis=1), use_container_width=True)
 
-        st.caption("ℹ️ TWR (TL): kur etkisi dahil TL bazlı getiri  •  TWR (PB): varlığın kendi para biriminde getiri")
+        st.caption("ℹ️ TWR (Time-Weighted Return): fiyat bazlı getiri, nakit giriş/çıkışından bağımsız — fonun/varlığın kendisinin ürettiği getiriyi ölçer. "
+                   "TWR (TL): her günün fiyatı o günkü döviz kuru ile TL'ye çevrilir, kur etkisi dahildir. "
+                   "TWR (PB): varlığın kendi para birimindeki fiyat değişimi. TRY varlıklarda ikisi aynıdır.")
 
 # ==========================================
 # SAYFA 3: AYLIK ÖZET
@@ -525,10 +536,10 @@ elif sayfa == "📅 Aylık Özet":
         if not mevcut_akislar.empty:
             st.dataframe(
                 mevcut_akislar.style.format({
-                    "dis_giris": "{:,.2f}",
-                    "dis_cikis": "{:,.2f}",
+                    "dis_giris": "{:,.0f}",
+                    "dis_cikis": "{:,.0f}",
                 }),
-                use_container_width=True
+                use_container_width=True, hide_index=True
             )
 
         # Yeni giriş formu
@@ -605,38 +616,42 @@ elif sayfa == "📅 Aylık Özet":
         with tab_tl:
             st.dataframe(
                 ozet_df.style.format({
-                    "Ay Başı"   : "{:,.2f}",
-                    "Dış Giriş" : "{:,.2f}",
-                    "Dış Çıkış" : "{:,.2f}",
-                    "Getiri"    : "{:,.2f}",
-                    "Ay Sonu"   : "{:,.2f}",
+                    "Ay Başı"   : "{:,.0f}",
+                    "Dış Giriş" : "{:,.0f}",
+                    "Dış Çıkış" : "{:,.0f}",
+                    "Getiri"    : "{:,.0f}",
+                    "Ay Sonu"   : "{:,.0f}",
                 }),
                 use_container_width=True
             )
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam Dış Giriş", f"{ozet_df['Dış Giriş'].sum():,.2f} TL")
-            col2.metric("Toplam Dış Çıkış", f"{ozet_df['Dış Çıkış'].sum():,.2f} TL")
-            col3.metric("Toplam Getiri",     f"{ozet_df['Getiri'].sum():,.2f} TL")
-            col4.metric("Yıl Sonu Değer",    f"{ozet_df['Ay Sonu'].iloc[-1]:,.2f} TL")
+            col1.metric("Toplam Dış Giriş", f"{ozet_df['Dış Giriş'].sum():,.0f} TL")
+            col2.metric("Toplam Dış Çıkış", f"{ozet_df['Dış Çıkış'].sum():,.0f} TL")
+            col3.metric("Toplam Getiri",     f"{ozet_df['Getiri'].sum():,.0f} TL")
+            col4.metric("Yıl Sonu Değer",    f"{ozet_df['Ay Sonu'].iloc[-1]:,.0f} TL")
 
         with tab_usd:
             st.dataframe(
                 usd_ozet_df.style.format({
-                    "Ay Başı"   : "${:,.2f}",
-                    "Dış Giriş" : "${:,.2f}",
-                    "Dış Çıkış" : "${:,.2f}",
-                    "Getiri"    : "${:,.2f}",
-                    "Ay Sonu"   : "${:,.2f}",
+                    "Ay Başı"   : "${:,.0f}",
+                    "Dış Giriş" : "${:,.0f}",
+                    "Dış Çıkış" : "${:,.0f}",
+                    "Getiri"    : "${:,.0f}",
+                    "Ay Sonu"   : "${:,.0f}",
                 }),
                 use_container_width=True
             )
 
             col5, col6, col7, col8 = st.columns(4)
-            col5.metric("Toplam Dış Giriş", f"${usd_ozet_df['Dış Giriş'].sum():,.2f}")
-            col6.metric("Toplam Dış Çıkış", f"${usd_ozet_df['Dış Çıkış'].sum():,.2f}")
-            col7.metric("Toplam Getiri",     f"${usd_ozet_df['Getiri'].sum():,.2f}")
-            col8.metric("Yıl Sonu Değer",    f"${usd_ozet_df['Ay Sonu'].iloc[-1]:,.2f}")
+            col5.metric("Toplam Dış Giriş", f"${usd_ozet_df['Dış Giriş'].sum():,.0f}")
+            col6.metric("Toplam Dış Çıkış", f"${usd_ozet_df['Dış Çıkış'].sum():,.0f}")
+            col7.metric("Toplam Getiri",     f"${usd_ozet_df['Getiri'].sum():,.0f}")
+            col8.metric("Yıl Sonu Değer",    f"${usd_ozet_df['Ay Sonu'].iloc[-1]:,.0f}")
+
+        st.caption("ℹ️ Getiri = Ay Sonu Değer − Ay Başı Değer − Dış Giriş + Dış Çıkış. "
+                   "Dış nakit akışları düzeltilmiştir, böylece portföye yeni para koymak getiri olarak sayılmaz. "
+                   "USD versiyonunda her ayın değeri o ayın kendi USD kuru ile çevrilir.")
 
         st.markdown("---")
         import plotly.express as px
@@ -697,14 +712,37 @@ elif sayfa == "📅 Aylık Özet":
                 )
 
             # --- Varlık bazında detay (açılır) ---
-            with st.expander("📋 Varlık Bazında Detay (TL)"):
+            with st.expander("📋 Varlık Bazında Detay"):
                 detay_df = dagilim_df[["Kod", "Tür", "Exposure", "PB"] + AY_ISIMLERI].copy()
-                st.dataframe(
-                    detay_df.style.format(
-                        {ay: "{:,.0f}" for ay in AY_ISIMLERI}
-                    ),
-                    use_container_width=True
-                )
+
+                # USD versiyonu: her ayın değerini o ayın kuruna böl
+                detay_usd_df = detay_df.copy()
+                for i, ay_adi in enumerate(AY_ISIMLERI):
+                    ay_no = i + 1
+                    if ay_no == 12:
+                        ay_sonu_tarih = f"{yil+1}-01-01"
+                    else:
+                        ay_sonu_tarih = f"{yil}-{str(ay_no+1).zfill(2)}-01"
+                    usd_kur = kur_getir("USD", ay_sonu_tarih)
+                    detay_usd_df[ay_adi] = detay_usd_df[ay_adi] / usd_kur
+
+                detay_tab_tl, detay_tab_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                with detay_tab_tl:
+                    st.dataframe(
+                        detay_df.style.format(
+                            {ay: "{:,.0f}" for ay in AY_ISIMLERI}
+                        ),
+                        use_container_width=True
+                    )
+
+                with detay_tab_usd:
+                    st.dataframe(
+                        detay_usd_df.style.format(
+                            {ay: "${:,.0f}" for ay in AY_ISIMLERI}
+                        ),
+                        use_container_width=True
+                    )
 
 # ==========================================
 # SAYFA 4: VARLIK EKLE
@@ -1235,8 +1273,8 @@ elif sayfa == "💱 Fiyat Güncelle":
         st.subheader("🤖 Otomatik Fiyat Çek")
         st.caption("Yahoo Finance'tan güncel fiyatları otomatik olarak çeker ve kaydeder.")
 
-        # --- Satır 1: Yabancı Hisse, BIST Hisse, Altın ---
-        oto_col1, oto_col2, oto_col3 = st.columns(3)
+        # --- Satır 1: Yabancı Hisse, BIST Hisse, Kripto, Altın ---
+        oto_col1, oto_col2, oto_col3, oto_col4 = st.columns(4)
 
         with oto_col1:
             if st.button("📈 Yabancı Hisse Fiyatları", use_container_width=True):
@@ -1263,6 +1301,18 @@ elif sayfa == "💱 Fiyat Güncelle":
                     st.warning("BIST fiyatı çekilemedi (piyasa kapalı olabilir veya BIST Hisse varlığı yok).")
 
         with oto_col3:
+            if st.button("🪙 Kripto Fiyatları", use_container_width=True):
+                with st.spinner("Yahoo Finance'tan kripto fiyatları çekiliyor..."):
+                    sayi = kripto_fiyatlari_cek()
+                if sayi > 0:
+                    st.success(f"✅ {sayi} kripto fiyatı güncellendi!")
+                    import time
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning("Kripto fiyatı çekilemedi (varlık tanımlı değil olabilir).")
+
+        with oto_col4:
             if st.button("🥇 Altın Fiyatları", use_container_width=True):
                 with st.spinner("Altın fiyatları hesaplanıyor..."):
                     sayi = altin_fiyatlari_cek()
@@ -1275,33 +1325,106 @@ elif sayfa == "💱 Fiyat Güncelle":
                 else:
                     st.warning("Altın fiyatı çekilemedi.")
 
-        # --- Satır 2: TEFAS Import ve Tümünü Çek ---
-        oto_col4, oto_col5 = st.columns(2)
+        # --- Satır 2: Tümünü Çek ---
+        if st.button("🔄 Tümünü Çek (Hisse + BIST + Kripto + Altın)", use_container_width=True, type="primary"):
+            with st.spinner("Tüm fiyatlar çekiliyor..."):
+                sayi = tum_fiyatlari_cek()
+            if sayi > 0:
+                st.success(f"✅ Toplam {sayi} fiyat güncellendi!")
+                import time
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.warning("Hiçbir fiyat çekilemedi.")
 
-        with oto_col4:
-            if st.button("📊 TEFAS Fon Fiyatları (CSV)", use_container_width=True):
-                with st.spinner("data/tefas/ klasöründeki CSV dosyaları okunuyor..."):
-                    try:
-                        tefas_import()
-                        st.success("✅ TEFAS fon fiyatları güncellendi!")
-                        import time
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"TEFAS import hatası: {e}")
-                st.caption("ℹ️ data/tefas/ klasörüne TEFAS'tan indirdiğiniz CSV dosyalarını koyun.")
+        # ==========================================
+        # GEÇMİŞ VERİ TAMAMLA
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📅 Geçmiş Veri Tamamla")
+        st.caption("Belirtilen tarihten bugüne günlük fiyat geçmişini Yahoo Finance'tan çeker. "
+                   "Yeni varlık ekledikten sonra sadece ilgili türü çekmeniz yeterlidir.")
 
-        with oto_col5:
-            if st.button("🔄 Tümünü Çek (Hisse + BIST + Altın)", use_container_width=True, type="primary"):
-                with st.spinner("Tüm fiyatlar çekiliyor..."):
-                    sayi = tum_fiyatlari_cek()
+        from datetime import date as _date
+        from dateutil.relativedelta import relativedelta as _rd
+
+        gecmis_baslangic = st.date_input(
+            "Başlangıç tarihi",
+            value=_date.today() - _rd(years=1),
+            key="gecmis_baslangic"
+        )
+        baslangic_str = str(gecmis_baslangic)
+
+        # --- Satır 1: Yabancı Hisse, BIST, Kripto, Altın ---
+        gc1, gc2, gc3, gc4 = st.columns(4)
+
+        with gc1:
+            if st.button("📈 Yabancı Hisse Geçmiş", use_container_width=True, key="gecmis_hisse"):
+                with st.spinner(f"Yabancı hisse geçmişi çekiliyor ({baslangic_str} →)..."):
+                    sayi = hisse_fiyatlari_cek(baslangic_str)
                 if sayi > 0:
-                    st.success(f"✅ Toplam {sayi} fiyat güncellendi!")
+                    st.success(f"✅ {sayi} kayıt eklendi!")
+                    import time; time.sleep(1); st.rerun()
+                else:
+                    st.warning("Veri çekilemedi.")
+
+        with gc2:
+            if st.button("🏦 BIST Geçmiş", use_container_width=True, key="gecmis_bist"):
+                with st.spinner(f"BIST geçmişi çekiliyor ({baslangic_str} →)..."):
+                    sayi = bist_fiyatlari_cek(baslangic_str)
+                if sayi > 0:
+                    st.success(f"✅ {sayi} kayıt eklendi!")
+                    import time; time.sleep(1); st.rerun()
+                else:
+                    st.warning("Veri çekilemedi.")
+
+        with gc3:
+            if st.button("🪙 Kripto Geçmiş", use_container_width=True, key="gecmis_kripto"):
+                with st.spinner(f"Kripto geçmişi çekiliyor ({baslangic_str} →)..."):
+                    sayi = kripto_fiyatlari_cek(baslangic_str)
+                if sayi > 0:
+                    st.success(f"✅ {sayi} kayıt eklendi!")
+                    import time; time.sleep(1); st.rerun()
+                else:
+                    st.warning("Veri çekilemedi.")
+
+        with gc4:
+            if st.button("🥇 Altın Geçmiş", use_container_width=True, key="gecmis_altin"):
+                with st.spinner(f"Altın geçmişi hesaplanıyor ({baslangic_str} →)..."):
+                    sayi = altin_fiyatlari_cek(baslangic_str)
+                if sayi > 0:
+                    st.success(f"✅ {sayi} kayıt eklendi!")
+                    import time; time.sleep(1); st.rerun()
+                else:
+                    st.warning("Veri çekilemedi.")
+
+        # --- Satır 2: Tümü ---
+        if st.button("🔄 Tüm Geçmiş Verileri Çek", use_container_width=True, key="gecmis_tum"):
+            with st.spinner(f"{baslangic_str} tarihinden bugüne TÜM fiyatlar çekiliyor... (bu birkaç dakika sürebilir)"):
+                sayi = tum_fiyatlari_cek(baslangic_str)
+            if sayi > 0:
+                st.success(f"✅ Toplam {sayi} geçmiş fiyat kaydı eklendi!")
+                import time; time.sleep(1); st.rerun()
+            else:
+                st.warning("Geçmiş veri çekilemedi.")
+
+        # ==========================================
+        # DOSYADAN YÜKLE (TEFAS CSV)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📂 Dosyadan Yükle")
+        st.caption("TEFAS'tan indirdiğiniz aylık CSV dosyalarını `data/tefas/` klasörüne koyun, ardından butona basın.")
+
+        if st.button("📊 TEFAS Fon Fiyatları (CSV'den İçe Aktar)", use_container_width=True):
+            with st.spinner("data/tefas/ klasöründeki CSV dosyaları okunuyor..."):
+                try:
+                    tefas_import()
+                    st.success("✅ TEFAS fon fiyatları güncellendi!")
                     import time
                     time.sleep(1)
                     st.rerun()
-                else:
-                    st.warning("Hiçbir fiyat çekilemedi.")
+                except Exception as e:
+                    st.error(f"TEFAS import hatası: {e}")
 
         st.markdown("---")
         st.subheader("✏️ Manuel Fiyat Güncelle")
@@ -1309,33 +1432,40 @@ elif sayfa == "💱 Fiyat Güncelle":
 
         guncel_fiyatlar = {}
 
-        # Varlık türüne göre grupla
-        for tur in sorted(df["tur"].unique()):
-            tur_df = df[df["tur"] == tur].reset_index(drop=True)
-            st.subheader(f"📂 {tur}")
+        # Mevduat türlerini filtrele (fiyatları her zaman 1, manuel güncellemeye gerek yok)
+        manuel_df = df[~df["tur"].isin(MEVDUAT_TURLERI)].copy()
 
-            # İki kolon
-            col1, col2 = st.columns(2)
-            for i, (_, row) in enumerate(tur_df.iterrows()):
-                onceki = son_fiyatlar[son_fiyatlar["varlik_id"] == row["id"]]
-                onceki_fiyat = float(onceki["fiyat"].values[0]) if not onceki.empty else 0.0
-                onceki_tarih = onceki["tarih"].values[0] if not onceki.empty else "—"
+        if manuel_df.empty:
+            st.info("Manuel fiyat girilecek varlık yok.")
+        else:
+            # Varlık türüne göre grupla
+            for tur in sorted(manuel_df["tur"].unique()):
+                tur_df = manuel_df[manuel_df["tur"] == tur].reset_index(drop=True)
+                st.subheader(f"📂 {tur}")
 
-                hedef_col = col1 if i % 2 == 0 else col2
-                with hedef_col:
-                    fiyat = st.number_input(
-                        f"{row['kod']} ({onceki_tarih})",
-                        min_value=0.0,
-                        step=0.0001,
-                        value=onceki_fiyat,
-                        format="%.4f",
-                        key=f"fiyat_{row['kod']}"
-                    )
-                    guncel_fiyatlar[row["kod"]] = {"fiyat": fiyat, "varlik_id": int(row["id"])}
+                # İki kolon
+                col1, col2 = st.columns(2)
+                for i, (_, row) in enumerate(tur_df.iterrows()):
+                    onceki = son_fiyatlar[son_fiyatlar["varlik_id"] == row["id"]]
+                    onceki_fiyat = float(onceki["fiyat"].values[0]) if not onceki.empty else 0.0
+                    onceki_tarih = onceki["tarih"].values[0] if not onceki.empty else "—"
 
-            st.markdown("---")
+                    hedef_col = col1 if i % 2 == 0 else col2
+                    with hedef_col:
+                        fiyat = st.number_input(
+                            f"{row['kod']} ({onceki_tarih})",
+                            min_value=0.0,
+                            step=0.0001,
+                            value=onceki_fiyat,
+                            format="%.4f",
+                            key=f"fiyat_{row['kod']}"
+                        )
+                        guncel_fiyatlar[row["kod"]] = {"fiyat": fiyat, "varlik_id": int(row["id"])}
+
+                st.markdown("---")
 
         if st.button("💾 Fiyatları Kaydet", type="primary"):
+            st.warning("⚠️ Aynı tarihte otomatik çekilmiş fiyat varsa üzerine yazılır.")
             baglanti = veritabani_baglan()
             cursor = baglanti.cursor()
             bugun = date.today().strftime("%Y-%m-%d")
