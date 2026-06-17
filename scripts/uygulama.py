@@ -21,6 +21,7 @@ from hesaplamalar import (
 )
 from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
+from kur_guncelle import kur_cek_ve_kaydet
 
 # --- Veritabanı bağlantısı ---
 def veritabani_baglan():
@@ -1532,8 +1533,8 @@ elif sayfa == "💱 Fiyat Güncelle":
         st.subheader("🤖 Otomatik Fiyat Çek")
         st.caption("Yahoo Finance'tan güncel fiyatları otomatik olarak çeker ve kaydeder.")
 
-        # --- Satır 1: Yabancı Hisse, BIST Hisse, Kripto, Altın ---
-        oto_col1, oto_col2, oto_col3, oto_col4 = st.columns(4)
+        # --- Satır 1: Yabancı Hisse, BIST Hisse, Kripto, Altın, Döviz Kuru ---
+        oto_col1, oto_col2, oto_col3, oto_col4, oto_col5 = st.columns(5)
 
         with oto_col1:
             if st.button("📈 Yabancı Hisse Fiyatları", use_container_width=True):
@@ -1584,12 +1585,30 @@ elif sayfa == "💱 Fiyat Güncelle":
                 else:
                     st.warning("Altın fiyatı çekilemedi.")
 
-        # --- Satır 2: Tümünü Çek ---
-        if st.button("🔄 Tümünü Çek (Hisse + BIST + Kripto + Altın)", use_container_width=True, type="primary"):
-            with st.spinner("Tüm fiyatlar çekiliyor..."):
+        with oto_col5:
+            if st.button("💱 Döviz Kurları", use_container_width=True):
+                bugun_str = date.today().strftime("%Y-%m-%d")
+                with st.spinner("Yahoo Finance'tan USD/EUR/GBP kurları çekiliyor..."):
+                    try:
+                        kur_cek_ve_kaydet(bugun_str)
+                        st.success("✅ Döviz kurları güncellendi!")
+                    except Exception as e:
+                        st.warning(f"Kur çekilemedi: {e}")
+                import time
+                time.sleep(1)
+                st.rerun()
+
+        # --- Satır 2: Tümünü Çek (kur dahil) ---
+        if st.button("🔄 Tümünü Çek (Hisse + BIST + Kripto + Altın + Kur)", use_container_width=True, type="primary"):
+            with st.spinner("Tüm fiyatlar ve kurlar çekiliyor..."):
+                bugun_str = date.today().strftime("%Y-%m-%d")
+                try:
+                    kur_cek_ve_kaydet(bugun_str)
+                except Exception as e:
+                    st.warning(f"Kur güncellenemedi: {e}")
                 sayi = tum_fiyatlari_cek()
             if sayi > 0:
-                st.success(f"✅ Toplam {sayi} fiyat güncellendi!")
+                st.success(f"✅ Toplam {sayi} fiyat güncellendi, kurlar da yenilendi!")
                 import time
                 time.sleep(1)
                 st.rerun()
@@ -1614,8 +1633,8 @@ elif sayfa == "💱 Fiyat Güncelle":
         )
         baslangic_str = str(gecmis_baslangic)
 
-        # --- Satır 1: Yabancı Hisse, BIST, Kripto, Altın ---
-        gc1, gc2, gc3, gc4 = st.columns(4)
+        # --- Satır 1: Yabancı Hisse, BIST, Kripto, Altın, Döviz Kuru ---
+        gc1, gc2, gc3, gc4, gc5 = st.columns(5)
 
         with gc1:
             if st.button("📈 Yabancı Hisse Geçmiş", use_container_width=True, key="gecmis_hisse"):
@@ -1657,12 +1676,26 @@ elif sayfa == "💱 Fiyat Güncelle":
                 else:
                     st.warning("Veri çekilemedi.")
 
-        # --- Satır 2: Tümü ---
-        if st.button("🔄 Tüm Geçmiş Verileri Çek", use_container_width=True, key="gecmis_tum"):
-            with st.spinner(f"{baslangic_str} tarihinden bugüne TÜM fiyatlar çekiliyor... (bu birkaç dakika sürebilir)"):
+        with gc5:
+            if st.button("💱 Kur Geçmişi", use_container_width=True, key="gecmis_kur"):
+                with st.spinner(f"USD/EUR/GBP kur geçmişi çekiliyor ({baslangic_str} →)..."):
+                    try:
+                        kur_cek_ve_kaydet(baslangic_str)
+                        st.success("✅ Kur geçmişi eklendi!")
+                    except Exception as e:
+                        st.warning(f"Kur çekilemedi: {e}")
+                import time; time.sleep(1); st.rerun()
+
+        # --- Satır 2: Tümü (kur dahil) ---
+        if st.button("🔄 Tüm Geçmiş Verileri Çek (Fiyat + Kur)", use_container_width=True, key="gecmis_tum"):
+            with st.spinner(f"{baslangic_str} tarihinden bugüne TÜM fiyatlar ve kurlar çekiliyor... (bu birkaç dakika sürebilir)"):
+                try:
+                    kur_cek_ve_kaydet(baslangic_str)
+                except Exception as e:
+                    st.warning(f"Kur güncellenemedi: {e}")
                 sayi = tum_fiyatlari_cek(baslangic_str)
             if sayi > 0:
-                st.success(f"✅ Toplam {sayi} geçmiş fiyat kaydı eklendi!")
+                st.success(f"✅ Toplam {sayi} geçmiş fiyat kaydı eklendi, kurlar da güncellendi!")
                 import time; time.sleep(1); st.rerun()
             else:
                 st.warning("Geçmiş veri çekilemedi.")
