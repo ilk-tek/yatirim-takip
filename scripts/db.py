@@ -60,8 +60,10 @@ def baglan():
 
         if _streamlit_cloud_mi():
             # Streamlit Cloud: doğrudan Turso'ya bağlan
+            # libsql:// → https:// çevir (uzak bağlantı için gerekli)
+            uzak_url = TURSO_URL.replace("libsql://", "https://")
             _baglanti = libsql.connect(
-                database=TURSO_URL,
+                uzak_url,
                 auth_token=TURSO_TOKEN,
             )
         else:
@@ -89,10 +91,20 @@ def sql_oku(sql, baglanti, params=None):
         return pd.read_sql(sql, baglanti, params=params)
     except Exception:
         # Çalışmazsa manuel çek (Streamlit Cloud)
-        if params:
-            cursor = baglanti.execute(sql, list(params))
-        else:
-            cursor = baglanti.execute(sql)
+        try:
+            if params:
+                cursor = baglanti.execute(sql, list(params))
+            else:
+                cursor = baglanti.execute(sql)
+        except Exception:
+            # Bazı libsql versiyonlarında cursor() gerekir
+            cur = baglanti.cursor()
+            if params:
+                cur.execute(sql, list(params))
+            else:
+                cur.execute(sql)
+            cursor = cur
+
         rows = cursor.fetchall()
         if not rows:
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
