@@ -10,7 +10,7 @@ os.chdir(os.path.join(os.path.dirname(__file__), ".."))
 import streamlit as st
 import sqlite3
 import pandas as pd
-from db import baglan, senkronize_et
+from db import baglan, senkronize_et, sql_oku
 from datetime import date, timedelta
 from hesaplamalar import (
     performans_ozeti, twr_hesapla, yilliklandir,
@@ -38,7 +38,7 @@ def araci_kurum_listesi():
     try:
         import db
         db._baglanti = None          # taze bağlantı garantile
-        df = pd.read_sql("SELECT ad FROM araci_kurumlar ORDER BY ad", baglan())
+        df = sql_oku("SELECT ad FROM araci_kurumlar ORDER BY ad", baglan())
         return [""] + df["ad"].tolist()
     except Exception:
         return ["", "İş Yatırım", "İş Bankası", "YKB", "Anadolubank",
@@ -49,7 +49,7 @@ def portfoy_etiketi_listesi():
     try:
         import db
         db._baglanti = None
-        df = pd.read_sql("SELECT ad FROM portfoy_etiketleri ORDER BY ad", baglan())
+        df = sql_oku("SELECT ad FROM portfoy_etiketleri ORDER BY ad", baglan())
         return [""] + df["ad"].tolist()
     except Exception:
         return ["", "Yatırım", "Defans", "Atak", "YP Fon",
@@ -171,7 +171,7 @@ if sayfa == "📊 Portföy":
 
     baglanti = veritabani_baglan()
 
-    df = pd.read_sql("""
+    df = sql_oku("""
         SELECT
             v.id,
             v.kod,
@@ -188,7 +188,7 @@ if sayfa == "📊 Portföy":
         LEFT JOIN islemler i ON v.id = i.varlik_id
         GROUP BY v.id
     """, baglanti)
-    son_fiyatlar = pd.read_sql("""
+    son_fiyatlar = sql_oku("""
         SELECT f1.varlik_id, f1.fiyat
         FROM fiyat_gecmisi f1
         INNER JOIN (
@@ -202,7 +202,7 @@ if sayfa == "📊 Portföy":
         st.info("Henüz varlık eklenmemiş.")
     else:
         # Son fiyat güncelleme tarihini göster
-        son_guncelleme = pd.read_sql("""
+        son_guncelleme = sql_oku("""
             SELECT MAX(tarih) as tarih FROM fiyat_gecmisi
         """, veritabani_baglan()).iloc[0]["tarih"]
         if son_guncelleme:
@@ -211,7 +211,7 @@ if sayfa == "📊 Portföy":
             st.warning("Henüz fiyat girilmemiş. 💱 Fiyat Güncelle sayfasından fiyat girin.")
 
         # --- Fiyat geçmişi eksik varlık uyarısı ---
-        eksik_fiyat = pd.read_sql("""
+        eksik_fiyat = sql_oku("""
             SELECT
                 v.kod, v.tur,
                 MIN(i.tarih) AS ilk_islem,
@@ -389,7 +389,7 @@ if sayfa == "📊 Portföy":
             st.subheader("🏦 Aracı Kurum Bazında Portföy")
 
             baglanti_ak = veritabani_baglan()
-            islem_bazli = pd.read_sql("""
+            islem_bazli = sql_oku("""
                 SELECT
                     v.id   AS varlik_id,
                     v.kod, v.ad, v.tur, v.para_birimi, v.exposure,
@@ -561,7 +561,7 @@ elif sayfa == "📈 Performans":
         st.subheader("Exposure Bazında Özet")
 
         baglanti      = veritabani_baglan()
-        exposure_bilgi = pd.read_sql("SELECT kod AS Kod, exposure FROM varliklar", baglanti)
+        exposure_bilgi = sql_oku("SELECT kod AS Kod, exposure FROM varliklar", baglanti)
 
         performans_exp = performans_df.merge(exposure_bilgi, on="Kod", how="left")
 
@@ -615,7 +615,7 @@ elif sayfa == "📅 Aylık Özet":
         st.caption("Portföye dışarıdan giren veya çıkan toplam nakit miktarını ay bazında girin.")
 
         baglanti = veritabani_baglan()
-        mevcut_akislar = pd.read_sql("""
+        mevcut_akislar = sql_oku("""
             SELECT ay, dis_giris, dis_cikis, notlar
             FROM portfoy_akislari
             WHERE yil = ?
@@ -705,7 +705,7 @@ elif sayfa == "📅 Aylık Özet":
         # ==========================================
         # fiyat_gecmisi'ndeki en son tarih hangi ay?
         # O aydan sonraki satırların tüm sayısal sütunlarını None yap.
-        son_fiyat_tarihi_ozet = pd.read_sql(
+        son_fiyat_tarihi_ozet = sql_oku(
             "SELECT MAX(tarih) as t FROM fiyat_gecmisi", veritabani_baglan()
         ).iloc[0]["t"]
 
@@ -913,7 +913,7 @@ elif sayfa == "📅 Aylık Özet":
             # Eğer bu tarihte fiyat verisi yoksa (kur_getir hariç) → boş göster.
             # En basit yaklaşım: fiyat_gecmisi'ndeki MAX(tarih)'i bul,
             # hangi aya denk geldiğini hesapla, o ay dahil sonrasını boş bırak.
-            son_fiyat_tarihi = pd.read_sql(
+            son_fiyat_tarihi = sql_oku(
                 "SELECT MAX(tarih) as t FROM fiyat_gecmisi", veritabani_baglan()
             ).iloc[0]["t"]
 
@@ -1068,7 +1068,7 @@ elif sayfa == "✏️ Varlık Düzenle":
     st.markdown("---")
 
     baglanti     = veritabani_baglan()
-    varliklar_df = pd.read_sql("SELECT * FROM varliklar", baglanti)
+    varliklar_df = sql_oku("SELECT * FROM varliklar", baglanti)
 
     if varliklar_df.empty:
         st.info("Henüz varlık eklenmemiş.")
@@ -1155,7 +1155,7 @@ elif sayfa == "💰 İşlem Ekle":
     st.markdown("---")
 
     baglanti     = veritabani_baglan()
-    varliklar_df = pd.read_sql("SELECT id, kod, ad, tur FROM varliklar", baglanti)
+    varliklar_df = sql_oku("SELECT id, kod, ad, tur FROM varliklar", baglanti)
 
     if varliklar_df.empty:
         st.warning("Önce varlık eklemeniz gerekiyor.")
@@ -1265,7 +1265,7 @@ elif sayfa == "✏️ İşlem Düzenle":
     st.markdown("---")
 
     baglanti    = veritabani_baglan()
-    islemler_df = pd.read_sql("""
+    islemler_df = sql_oku("""
         SELECT i.id, i.tarih, v.kod, v.ad, i.islem_turu, i.adet, i.fiyat, i.tutar,
                i.notlar, i.araci_kurum, i.portfoy_etiketi
         FROM islemler i
@@ -1399,7 +1399,7 @@ elif sayfa == "📋 İşlem Geçmişi":
     st.markdown("---")
 
     baglanti = veritabani_baglan()
-    df = pd.read_sql("""
+    df = sql_oku("""
         SELECT i.tarih, v.kod, v.ad, i.islem_turu, i.adet, i.fiyat, i.tutar,
                i.araci_kurum, i.portfoy_etiketi, i.notlar
         FROM islemler i
@@ -1420,7 +1420,7 @@ elif sayfa == "🗓️ Fiyat Geçmişi":
     st.markdown("---")
 
     baglanti     = veritabani_baglan()
-    varliklar_df = pd.read_sql("SELECT id, kod, ad FROM varliklar ORDER BY kod", baglanti)
+    varliklar_df = sql_oku("SELECT id, kod, ad FROM varliklar ORDER BY kod", baglanti)
 
     if varliklar_df.empty:
         st.info("Henüz varlık eklenmemiş.")
@@ -1436,7 +1436,7 @@ elif sayfa == "🗓️ Fiyat Geçmişi":
         st.markdown("---")
 
         baglanti = veritabani_baglan()
-        fiyat_df = pd.read_sql("""
+        fiyat_df = sql_oku("""
             SELECT tarih, fiyat, kaynak
             FROM fiyat_gecmisi
             WHERE varlik_id = ?
@@ -1517,7 +1517,7 @@ elif sayfa == "💱 Fiyat Güncelle":
     st.markdown("---")
 
     baglanti = veritabani_baglan()
-    df = pd.read_sql("""
+    df = sql_oku("""
         SELECT
             v.id, v.kod, v.ad, v.tur,
             SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.adet ELSE -i.adet END) AS toplam_adet
@@ -1527,7 +1527,7 @@ elif sayfa == "💱 Fiyat Güncelle":
         HAVING toplam_adet > 0
     """, baglanti)
 
-    son_fiyatlar = pd.read_sql("""
+    son_fiyatlar = sql_oku("""
         SELECT f1.varlik_id, f1.fiyat, f1.tarih
         FROM fiyat_gecmisi f1
         INNER JOIN (
@@ -1541,7 +1541,7 @@ elif sayfa == "💱 Fiyat Güncelle":
         st.info("Henüz varlık eklenmemiş.")
     else:
         # --- Fiyat geçmişi eksik varlık uyarısı ---
-        eksik_fiyat_fg = pd.read_sql("""
+        eksik_fiyat_fg = sql_oku("""
             SELECT
                 v.kod, v.tur,
                 MIN(i.tarih) AS ilk_islem,

@@ -3,7 +3,7 @@
 # ==========================================
 import sqlite3
 import pandas as pd
-from db import baglan
+from db import baglan, sql_oku
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -186,13 +186,13 @@ def twr_hesapla(varlik_id, baslangic_tarihi=None, bitis_tarihi=None):
     para_birimi = sonuc[0] if sonuc else "TRY"
 
     if baslangic_tarihi and bitis_tarihi:
-        df = pd.read_sql("""
+        df = sql_oku("""
             SELECT tarih, fiyat FROM fiyat_gecmisi
             WHERE varlik_id = ? AND tarih BETWEEN ? AND ?
             ORDER BY tarih ASC
         """, baglanti, params=(varlik_id, baslangic_tarihi, bitis_tarihi))
     else:
-        df = pd.read_sql("""
+        df = sql_oku("""
             SELECT tarih, fiyat FROM fiyat_gecmisi
             WHERE varlik_id = ?
             ORDER BY tarih ASC
@@ -247,7 +247,7 @@ def aylik_twr_hesapla(varlik_id, yil, ay):
     sonuc = cursor.fetchone()
     para_birimi = sonuc[0] if sonuc else "TRY"
 
-    df = pd.read_sql("""
+    df = sql_oku("""
         SELECT tarih, fiyat FROM fiyat_gecmisi
         WHERE varlik_id = ?
           AND strftime('%Y', tarih) = ?
@@ -285,7 +285,7 @@ def performans_ozeti(donem="bu_ay"):
     else:
         baslangic = "2000-01-01"
     bitis = bugun.strftime("%Y-%m-%d")
-    varliklar = pd.read_sql("SELECT id, kod, ad, tur, para_birimi FROM varliklar", baglanti)
+    varliklar = sql_oku("SELECT id, kod, ad, tur, para_birimi FROM varliklar", baglanti)
     sonuclar = []
     for _, varlik in varliklar.iterrows():
         sonuc = twr_hesapla(varlik["id"], baslangic, bitis)
@@ -300,7 +300,7 @@ def performans_ozeti(donem="bu_ay"):
             yillik_pb  = yilliklandir(sonuc["twr_pb"], gun_sayisi) if gun_sayisi > 0 else None
 
             baglanti2    = veritabani_baglan()
-            son_fiyat_df = pd.read_sql("""
+            son_fiyat_df = sql_oku("""
                 SELECT MAX(tarih) as son_tarih FROM fiyat_gecmisi
                 WHERE varlik_id = ?
             """, baglanti2, params=(varlik["id"],))
@@ -338,7 +338,7 @@ def mevduat_deger_hesapla(varlik_id, hedef_tarih=None):
     elif isinstance(hedef_tarih, str):
         hedef_tarih = datetime.strptime(hedef_tarih, "%Y-%m-%d").date()
     baglanti = veritabani_baglan()
-    mevduat = pd.read_sql("""
+    mevduat = sql_oku("""
         SELECT * FROM mevduat_detay
         WHERE varlik_id = ? AND aktif = 1
         ORDER BY baslangic_tarihi DESC LIMIT 1
@@ -347,11 +347,11 @@ def mevduat_deger_hesapla(varlik_id, hedef_tarih=None):
         return None
     m         = mevduat.iloc[0]
     baslangic = datetime.strptime(m["baslangic_tarihi"], "%Y-%m-%d").date()
-    islemler = pd.read_sql("""
+    islemler = sql_oku("""
         SELECT tarih, islem_turu, tutar FROM islemler
         WHERE varlik_id = ? ORDER BY tarih ASC
     """, baglanti, params=(varlik_id,))
-    faiz_df = pd.read_sql("""
+    faiz_df = sql_oku("""
         SELECT tarih, faiz_orani FROM faiz_gecmisi
         WHERE varlik_id = ? ORDER BY tarih ASC
     """, baglanti, params=(varlik_id,))
@@ -388,10 +388,10 @@ def mevduat_deger_hesapla(varlik_id, hedef_tarih=None):
 
 def aylik_portfoy_ozeti(yil):
     baglanti  = veritabani_baglan()
-    varliklar = pd.read_sql("SELECT id, kod, tur, para_birimi FROM varliklar", baglanti)
+    varliklar = sql_oku("SELECT id, kod, tur, para_birimi FROM varliklar", baglanti)
 
     # --- Dış akışları PORTFÖY SEVİYESİNDE oku (yeni tablo) ---
-    dis_akislar = pd.read_sql(f"""
+    dis_akislar = sql_oku(f"""
         SELECT ay, dis_giris, dis_cikis
         FROM portfoy_akislari
         WHERE yil = {int(yil)}
@@ -415,7 +415,7 @@ def aylik_portfoy_ozeti(yil):
             kur = kur_getir(pb, tarih)
 
             # Net adet (her iki tür için de aynı)
-            adet_df = pd.read_sql("""
+            adet_df = sql_oku("""
                 SELECT SUM(CASE WHEN islem_turu = 'Alış' THEN adet
                                 ELSE -adet END) as net_adet
                 FROM islemler WHERE varlik_id = ? AND tarih < ?
@@ -430,7 +430,7 @@ def aylik_portfoy_ozeti(yil):
                 return net_adet * 1.0 * kur
             else:
                 # Normal varlık: fiyat_gecmisi'nden son fiyat
-                fiyat_df = pd.read_sql("""
+                fiyat_df = sql_oku("""
                     SELECT fiyat FROM fiyat_gecmisi
                     WHERE varlik_id = ? AND tarih < ?
                     ORDER BY tarih DESC LIMIT 1
@@ -492,7 +492,7 @@ def aylik_dagilim_hesapla(yil):
       - değer = fiyat × net_adet × kur
     """
     baglanti  = veritabani_baglan()
-    varliklar = pd.read_sql(
+    varliklar = sql_oku(
         "SELECT id, kod, ad, tur, para_birimi, exposure FROM varliklar",
         baglanti
     )
@@ -518,7 +518,7 @@ def aylik_dagilim_hesapla(yil):
             baglanti = veritabani_baglan()
 
             # Net adet (her iki tür için de aynı)
-            adet_df = pd.read_sql("""
+            adet_df = sql_oku("""
                 SELECT SUM(CASE WHEN islem_turu = 'Alış' THEN adet
                                 ELSE -adet END) as net_adet
                 FROM islemler
@@ -540,7 +540,7 @@ def aylik_dagilim_hesapla(yil):
                 deger = round(net_adet * 1.0 * kur, 2)
             else:
                 # Normal varlık: fiyat_gecmisi'nden son fiyat
-                fiyat_df = pd.read_sql("""
+                fiyat_df = sql_oku("""
                     SELECT fiyat FROM fiyat_gecmisi
                     WHERE varlik_id = ? AND tarih < ?
                     ORDER BY tarih DESC LIMIT 1

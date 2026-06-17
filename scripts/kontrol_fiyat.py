@@ -8,12 +8,12 @@
 # ============================================================
 
 import pandas as pd
-from db import baglan
+from db import baglan, sql_oku
 
 baglanti = baglan()
 
 # --- Tüm varlıkların fiyat durumu ---
-df = pd.read_sql("""
+df = sql_oku("""
     SELECT
         v.kod,
         v.ad,
@@ -44,7 +44,7 @@ print(f"Toplam: {df['kayit_sayisi'].sum()} fiyat kaydı")
 print("\n\n📊 Fiziki Maden — Yıl Bazında Kayıt Sayısı:")
 print("-" * 60)
 
-altin_df = pd.read_sql("""
+altin_df = sql_oku("""
     SELECT
         v.kod,
         strftime('%Y', f.tarih) AS yil,

@@ -7,13 +7,13 @@
 # Çalışma mantığı:
 #   - Streamlit Cloud'da: doğrudan Turso bulut bağlantısı (replica olmadan)
 #   - Lokal'de: embedded replica (yerel kopya) ile hızlı okuma
-#
-# Yerel kopya dosyası iCloud KLASÖRÜNÜN DIŞINDA tutulur.
 # ==========================================
 
 import os
 import warnings
 from pathlib import Path
+
+import pandas as pd
 
 try:
     import libsql_experimental as libsql
@@ -29,13 +29,13 @@ load_dotenv(PROJE_KOKU / ".env")
 TURSO_URL   = os.environ.get("TURSO_DATABASE_URL", "").strip()
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
 
-# pandas, libsql bağlantısı için zararsız bir uyarı verir; onu gizliyoruz.
+# pandas uyarısını gizle
 warnings.filterwarnings(
     "ignore",
     message="pandas only supports SQLAlchemy connectable.*"
 )
 
-# Tek paylaşılan bağlantı (singleton). Tüm uygulama bunu kullanır.
+# Tek paylaşılan bağlantı (singleton)
 _baglanti = None
 
 
@@ -59,13 +59,13 @@ def baglan():
             )
 
         if _streamlit_cloud_mi():
-            # Streamlit Cloud: doğrudan Turso'ya bağlan (replica yok)
+            # Streamlit Cloud: doğrudan Turso'ya bağlan
             _baglanti = libsql.connect(
                 database=TURSO_URL,
                 auth_token=TURSO_TOKEN,
             )
         else:
-            # Lokal: embedded replica ile bağlan (hızlı okuma)
+            # Lokal: embedded replica ile bağlan
             _KLASOR = Path.home() / ".yatirim_takip"
             _KLASOR.mkdir(parents=True, exist_ok=True)
             LOKAL_REPLIKA = str(_KLASOR / "portfoy_replica.db")
@@ -78,11 +78,33 @@ def baglan():
     return _baglanti
 
 
+def sql_oku(sql, baglanti, params=None):
+    """
+    pd.read_sql() yerine kullan.
+    libsql_experimental bağlantısıyla pandas uyumsuzluğunu çözer.
+    Hem Streamlit Cloud'da hem lokalde çalışır.
+    """
+    try:
+        # Önce normal pd.read_sql dene (lokalde çalışır)
+        return pd.read_sql(sql, baglanti, params=params)
+    except Exception:
+        # Çalışmazsa manuel çek (Streamlit Cloud)
+        if params:
+            cursor = baglanti.execute(sql, list(params))
+        else:
+            cursor = baglanti.execute(sql)
+        rows = cursor.fetchall()
+        if not rows:
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            return pd.DataFrame(columns=columns)
+        columns = [desc[0] for desc in cursor.description]
+        return pd.DataFrame(rows, columns=columns)
+
+
 def senkronize_et():
     """
     Bulut ile yerel kopya arasında senkronizasyon yapar.
     Streamlit Cloud'da bu işlem atlanır (zaten doğrudan buluta bağlı).
-    Hata olursa uygulamayı çökertmez, sadece uyarı yazar.
     """
     try:
         if not _streamlit_cloud_mi():
