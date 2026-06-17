@@ -133,7 +133,9 @@ if sayfa == "📊 Portföy":
             v.tur,
             v.para_birimi,
             v.exposure,
-            SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.adet  ELSE -i.adet END) AS toplam_adet,
+            SUM(CASE WHEN i.islem_turu = 'Alış'  THEN i.adet
+                         WHEN i.islem_turu = 'Satış' THEN -i.adet
+                         ELSE 0 END) AS toplam_adet,
             SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.adet  ELSE 0 END)        AS toplam_alis_adet,
             SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.tutar ELSE 0 END)        AS toplam_alis_tutar
         FROM varliklar v
@@ -141,11 +143,13 @@ if sayfa == "📊 Portföy":
         GROUP BY v.id
     """, baglanti)
     son_fiyatlar = pd.read_sql("""
-        SELECT varlik_id, fiyat
-        FROM fiyat_gecmisi
-        WHERE id IN (
-            SELECT MAX(id) FROM fiyat_gecmisi GROUP BY varlik_id
-        )
+        SELECT f1.varlik_id, f1.fiyat
+        FROM fiyat_gecmisi f1
+        INNER JOIN (
+            SELECT varlik_id, MAX(tarih) AS son_tarih
+            FROM fiyat_gecmisi
+            GROUP BY varlik_id
+        ) f2 ON f1.varlik_id = f2.varlik_id AND f1.tarih = f2.son_tarih
     """, baglanti)
 
     if df.empty:
@@ -159,6 +163,38 @@ if sayfa == "📊 Portföy":
             st.info(f"📅 Son fiyat güncellemesi: **{son_guncelleme}** — Güncellemek için 💱 Fiyat Güncelle sayfasına gidin.")
         else:
             st.warning("Henüz fiyat girilmemiş. 💱 Fiyat Güncelle sayfasından fiyat girin.")
+
+        # --- Fiyat geçmişi eksik varlık uyarısı ---
+        eksik_fiyat = pd.read_sql("""
+            SELECT
+                v.kod, v.tur,
+                MIN(i.tarih) AS ilk_islem,
+                (SELECT MIN(f.tarih) FROM fiyat_gecmisi f WHERE f.varlik_id = v.id) AS ilk_fiyat
+            FROM varliklar v
+            JOIN islemler i ON v.id = i.varlik_id AND i.islem_turu = 'Alış'
+            JOIN (
+                SELECT varlik_id, SUM(CASE WHEN islem_turu = 'Alış' THEN adet ELSE -adet END) AS net
+                FROM islemler WHERE islem_turu IN ('Alış', 'Satış')
+                GROUP BY varlik_id HAVING net > 0
+            ) p ON v.id = p.varlik_id
+            WHERE v.tur NOT IN ('TL Mevduat', 'YP Mevduat')
+            GROUP BY v.id
+        """, veritabani_baglan())
+
+        if not eksik_fiyat.empty:
+            uyarilar = []
+            for _, r in eksik_fiyat.iterrows():
+                if r["ilk_fiyat"] is None:
+                    uyarilar.append(f"**{r['kod']}** ({r['tur']}) — ilk işlem: {r['ilk_islem']}, fiyat verisi yok")
+                else:
+                    from datetime import datetime as _dt
+                    islem_dt = _dt.strptime(r["ilk_islem"], "%Y-%m-%d")
+                    fiyat_dt = _dt.strptime(r["ilk_fiyat"], "%Y-%m-%d")
+                    bosluk = (fiyat_dt - islem_dt).days
+                    if bosluk > 3:
+                        uyarilar.append(f"**{r['kod']}** ({r['tur']}) — ilk işlem: {r['ilk_islem']}, ilk fiyat: {r['ilk_fiyat']} ({bosluk} gün boşluk)")
+            if uyarilar:
+                st.warning("⚠️ Fiyat verisi eksik:\n\n" + "\n\n".join(uyarilar) + "\n\n💱 Fiyat Güncelle → Geçmiş Veri Tamamla bölümünden çekin.")
 
         st.markdown("---")
         st.subheader("Portföy Özeti")
@@ -246,11 +282,19 @@ if sayfa == "📊 Portföy":
             tur_dagilim["Yüzde"] = (tur_dagilim["Değer (TL)"] / tur_dagilim["Değer (TL)"].sum() * 100).round(1)
             tur_dagilim = tur_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
             tur_dagilim["Yüzde"] = tur_dagilim["Yüzde"].apply(lambda x: f"%{x}")
+            # TOPLAM satırı
+            tur_dagilim = pd.concat([tur_dagilim, pd.DataFrame([{
+                "Tür": "TOPLAM", "Değer (TL)": tur_dagilim["Değer (TL)"].sum(), "Yüzde": "%100.0"
+            }])], ignore_index=True)
 
             exp_dagilim = ozet_df.groupby("Exposure")["Değer (TL)"].sum().reset_index()
             exp_dagilim["Yüzde"] = (exp_dagilim["Değer (TL)"] / exp_dagilim["Değer (TL)"].sum() * 100).round(1)
             exp_dagilim = exp_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
             exp_dagilim["Yüzde"] = exp_dagilim["Yüzde"].apply(lambda x: f"%{x}")
+            # TOPLAM satırı
+            exp_dagilim = pd.concat([exp_dagilim, pd.DataFrame([{
+                "Exposure": "TOPLAM", "Değer (TL)": exp_dagilim["Değer (TL)"].sum(), "Yüzde": "%100.0"
+            }])], ignore_index=True)
 
             grafik_col1, grafik_col2 = st.columns(2)
             with grafik_col1:
@@ -610,6 +654,43 @@ elif sayfa == "📅 Aylık Özet":
             })
         usd_ozet_df = pd.DataFrame(usd_satirlar)
 
+        # ==========================================
+        # GELECEKTEKİ AYLARI BOŞ GÖSTER
+        # ==========================================
+        # fiyat_gecmisi'ndeki en son tarih hangi ay?
+        # O aydan sonraki satırların tüm sayısal sütunlarını None yap.
+        son_fiyat_tarihi_ozet = pd.read_sql(
+            "SELECT MAX(tarih) as t FROM fiyat_gecmisi", veritabani_baglan()
+        ).iloc[0]["t"]
+
+        sutunlar = ["Ay Başı", "Dış Giriş", "Dış Çıkış", "Getiri", "Ay Sonu"]
+
+        if son_fiyat_tarihi_ozet:
+            from datetime import datetime as _dt3
+            son_dt_ozet = _dt3.strptime(son_fiyat_tarihi_ozet, "%Y-%m-%d")
+            son_ay_ozet = son_dt_ozet.month   # örn: 6
+            son_yil_ozet = son_dt_ozet.year   # örn: 2026
+
+            if son_yil_ozet == yil:
+                # Son ay dahil, sonrası boş
+                for sutun in sutunlar:
+                    ozet_df[sutun] = ozet_df.apply(
+                        lambda r: r[sutun] if int(r["Ay"].split("-")[1]) <= son_ay_ozet else None, axis=1
+                    )
+                    usd_ozet_df[sutun] = usd_ozet_df.apply(
+                        lambda r: r[sutun] if int(r["Ay"].split("-")[1]) <= son_ay_ozet else None, axis=1
+                    )
+            elif son_yil_ozet < yil:
+                # Seçili yıl tamamen gelecek → tüm satırlar boş
+                for sutun in sutunlar:
+                    ozet_df[sutun] = None
+                    usd_ozet_df[sutun] = None
+            # son_yil_ozet > yil → seçili yıl tamamen geçmiş, hiçbir şey yapma
+
+        # Metriklerde sadece dolu satırları kullan
+        tl_dolu  = ozet_df.dropna(subset=["Ay Sonu"])
+        usd_dolu = usd_ozet_df.dropna(subset=["Ay Sonu"])
+
         # --- Sekmeler: TL ve USD ---
         tab_tl, tab_usd = st.tabs(["🇹🇷 TL Bazında", "🇺🇸 USD Bazında"])
 
@@ -621,15 +702,15 @@ elif sayfa == "📅 Aylık Özet":
                     "Dış Çıkış" : "{:,.0f}",
                     "Getiri"    : "{:,.0f}",
                     "Ay Sonu"   : "{:,.0f}",
-                }),
+                }, na_rep=""),
                 use_container_width=True
             )
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam Dış Giriş", f"{ozet_df['Dış Giriş'].sum():,.0f} TL")
-            col2.metric("Toplam Dış Çıkış", f"{ozet_df['Dış Çıkış'].sum():,.0f} TL")
-            col3.metric("Toplam Getiri",     f"{ozet_df['Getiri'].sum():,.0f} TL")
-            col4.metric("Yıl Sonu Değer",    f"{ozet_df['Ay Sonu'].iloc[-1]:,.0f} TL")
+            col1.metric("Toplam Dış Giriş", f"{tl_dolu['Dış Giriş'].sum():,.0f} TL")
+            col2.metric("Toplam Dış Çıkış", f"{tl_dolu['Dış Çıkış'].sum():,.0f} TL")
+            col3.metric("Toplam Getiri",     f"{tl_dolu['Getiri'].sum():,.0f} TL")
+            col4.metric("Yıl Sonu Değer",    f"{tl_dolu['Ay Sonu'].iloc[-1]:,.0f} TL" if not tl_dolu.empty else "—")
 
         with tab_usd:
             st.dataframe(
@@ -639,15 +720,15 @@ elif sayfa == "📅 Aylık Özet":
                     "Dış Çıkış" : "${:,.0f}",
                     "Getiri"    : "${:,.0f}",
                     "Ay Sonu"   : "${:,.0f}",
-                }),
+                }, na_rep=""),
                 use_container_width=True
             )
 
             col5, col6, col7, col8 = st.columns(4)
-            col5.metric("Toplam Dış Giriş", f"${usd_ozet_df['Dış Giriş'].sum():,.0f}")
-            col6.metric("Toplam Dış Çıkış", f"${usd_ozet_df['Dış Çıkış'].sum():,.0f}")
-            col7.metric("Toplam Getiri",     f"${usd_ozet_df['Getiri'].sum():,.0f}")
-            col8.metric("Yıl Sonu Değer",    f"${usd_ozet_df['Ay Sonu'].iloc[-1]:,.0f}")
+            col5.metric("Toplam Dış Giriş", f"${usd_dolu['Dış Giriş'].sum():,.0f}")
+            col6.metric("Toplam Dış Çıkış", f"${usd_dolu['Dış Çıkış'].sum():,.0f}")
+            col7.metric("Toplam Getiri",     f"${usd_dolu['Getiri'].sum():,.0f}")
+            col8.metric("Yıl Sonu Değer",    f"${usd_dolu['Ay Sonu'].iloc[-1]:,.0f}" if not usd_dolu.empty else "—")
 
         st.caption("ℹ️ Getiri = Ay Sonu Değer − Ay Başı Değer − Dış Giriş + Dış Çıkış. "
                    "Dış nakit akışları düzeltilmiştir, böylece portföye yeni para koymak getiri olarak sayılmaz. "
@@ -665,13 +746,106 @@ elif sayfa == "📅 Aylık Özet":
         st.plotly_chart(fig, use_container_width=True)
 
         # ==========================================
-        # AYLIK VARLIK DAĞILIMI
+        # DAĞILIM VERİSİNİ HESAPLA (ay detayı + matris için ortak)
+        # ==========================================
+        with st.spinner("Dağılım hesaplanıyor..."):
+            dagilim_df = aylik_dagilim_hesapla(yil)
+
+        # ==========================================
+        # AY DETAYI — Tür → Exposure → Varlık kırılımı
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🔍 Ay Detayı")
+
+        if dagilim_df.empty:
+            st.info("Dağılım verisi bulunamadı.")
+        else:
+            # Ay seçici
+            ay_secenekleri = {f"{i} — {AY_ISIMLERI[i-1]}": i for i in range(1, 13)}
+            secilen_ay_str = st.selectbox("Ay seçin:", list(ay_secenekleri.keys()), index=min(date.today().month, 12) - 1)
+            secilen_ay = ay_secenekleri[secilen_ay_str]
+            secilen_ay_adi = AY_ISIMLERI[secilen_ay - 1]
+
+            # Seçilen ayda değeri olan varlıkları filtrele
+            ay_df = dagilim_df[dagilim_df[secilen_ay_adi] > 0].copy()
+
+            if ay_df.empty:
+                st.info(f"{secilen_ay_adi} ayında değeri olan varlık yok.")
+            else:
+                # USD kuru (o ayın sonu)
+                if secilen_ay == 12:
+                    ay_sonu_tarih_detay = f"{yil+1}-01-01"
+                else:
+                    ay_sonu_tarih_detay = f"{yil}-{str(secilen_ay+1).zfill(2)}-01"
+                usd_kur_detay = kur_getir("USD", ay_sonu_tarih_detay)
+
+                ay_df["Değer (TL)"] = ay_df[secilen_ay_adi]
+                ay_df["Değer (USD)"] = ay_df[secilen_ay_adi] / usd_kur_detay
+
+                # Toplam
+                toplam_tl = ay_df["Değer (TL)"].sum()
+                toplam_usd = ay_df["Değer (USD)"].sum()
+
+                col_m1, col_m2 = st.columns(2)
+                col_m1.metric(f"{secilen_ay_adi} Ay Sonu (TL)", f"{toplam_tl:,.0f} TL")
+                col_m2.metric(f"{secilen_ay_adi} Ay Sonu (USD)", f"${toplam_usd:,.0f}")
+
+                # --- Yardımcı fonksiyonlar ---
+                def ay_deger_ozet(filtre_df):
+                    return {
+                        "Değer (TL)": filtre_df["Değer (TL)"].sum(),
+                        "Değer (USD)": filtre_df["Değer (USD)"].sum(),
+                    }
+
+                def ay_deger_str(oz):
+                    return (
+                        f"Değer: **{oz['Değer (TL)']:,.0f} TL** | "
+                        f"USD: **${oz['Değer (USD)']:,.0f}**"
+                    )
+
+                # --- Tür → Exposure → Varlık expander'ları ---
+                turler = sorted(ay_df["Tür"].unique())
+
+                for tur in turler:
+                    tur_df = ay_df[ay_df["Tür"] == tur]
+                    tur_oz = ay_deger_ozet(tur_df)
+
+                    with st.expander(f"📂 {tur}  —  {ay_deger_str(tur_oz)}"):
+                        # Exposure özet tablosu
+                        exp_grp = tur_df.groupby("Exposure").agg(
+                            DegerTL=("Değer (TL)", "sum"),
+                            DegerUSD=("Değer (USD)", "sum"),
+                        ).reset_index()
+                        exp_grp.columns = ["Exposure", "Değer (TL)", "Değer (USD)"]
+                        exp_grp["Yüzde"] = (exp_grp["Değer (TL)"] / toplam_tl * 100).round(1)
+                        exp_grp["Yüzde"] = exp_grp["Yüzde"].apply(lambda x: f"%{x}")
+
+                        st.markdown("**Exposure Özeti**")
+                        st.dataframe(
+                            exp_grp.style.format({
+                                "Değer (TL)": "{:,.0f}",
+                                "Değer (USD)": "${:,.0f}",
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+
+                        # Varlık listesi
+                        st.markdown("**Varlık Listesi**")
+                        goster = tur_df[["Kod", "Exposure", "PB", "Değer (TL)", "Değer (USD)"]].copy()
+                        goster = goster.sort_values("Değer (TL)", ascending=False)
+                        st.dataframe(
+                            goster.style.format({
+                                "Değer (TL)": "{:,.0f}",
+                                "Değer (USD)": "${:,.0f}",
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+
+        # ==========================================
+        # AYLIK VARLIK DAĞILIMI (matris)
         # ==========================================
         st.markdown("---")
         st.subheader("📊 Aylık Varlık Dağılımı (Ay Sonu Değerleri)")
-
-        with st.spinner("Dağılım hesaplanıyor..."):
-            dagilim_df = aylik_dagilim_hesapla(yil)
 
         if dagilim_df.empty:
             st.info("Dağılım verisi bulunamadı.")
@@ -685,6 +859,43 @@ elif sayfa == "📅 Aylık Özet":
             # Toplam satırı ekle (Aylık Özet'teki Ay Sonu ile eşleşir)
             grup_df.loc["TOPLAM"] = grup_df.sum()
 
+            # ==========================================
+            # GELECEKTEKİ AYLARI BOŞ GÖSTER
+            # ==========================================
+            # Son güncel fiyat tarihi hangi ay? O aydan sonrasını None yap.
+            # Mantık: ay_sonu_tarihi = "bir sonraki ayın 1'i"
+            # Eğer bu tarihte fiyat verisi yoksa (kur_getir hariç) → boş göster.
+            # En basit yaklaşım: fiyat_gecmisi'ndeki MAX(tarih)'i bul,
+            # hangi aya denk geldiğini hesapla, o ay dahil sonrasını boş bırak.
+            son_fiyat_tarihi = pd.read_sql(
+                "SELECT MAX(tarih) as t FROM fiyat_gecmisi", veritabani_baglan()
+            ).iloc[0]["t"]
+
+            if son_fiyat_tarihi:
+                from datetime import datetime as _dt2
+                son_dt = _dt2.strptime(son_fiyat_tarihi, "%Y-%m-%d")
+                # Hangi ay sonu hesaplamasına girer? ay_sonu = "bir sonraki ayın 1'i"
+                # Eğer son fiyat 15 Haziran ise:
+                #   Haziran sonu = 2026-07-01 → bu tarihte veri var mı?
+                #   Veri ancak 2026-06-15'e kadar var, 2026-07-01 bilinmiyor.
+                # Bu yüzden: son fiyatın AYI = o ay dahil son dolu ay.
+                # Temmuz ve sonrası (ay_no >= son_ay + 1) → boş.
+                son_ay_no = son_dt.month  # örn: 6 (Haziran)
+                son_yil   = son_dt.year
+
+                # Sadece seçili yıl için geçerli
+                if son_yil == yil:
+                    for i, ay_adi in enumerate(AY_ISIMLERI):
+                        ay_no = i + 1  # 1=Oca, 2=Şub, ...
+                        if ay_no > son_ay_no:
+                            # Gelecek ay → None yap (boş gösterilecek)
+                            grup_df[ay_adi] = grup_df[ay_adi].apply(lambda x: None)
+                elif son_yil < yil:
+                    # Seçili yıl tamamen gelecekte → tüm aylar boş
+                    for ay_adi in AY_ISIMLERI:
+                        grup_df[ay_adi] = grup_df[ay_adi].apply(lambda x: None)
+                # son_yil > yil: seçili yıl tamamen geçmişte → hiçbir şey yapma
+
             # --- USD versiyonu: her ayın değerini o ayın USD kuruna böl ---
             usd_grup_df = grup_df.copy()
             for i, ay_adi in enumerate(AY_ISIMLERI):
@@ -694,26 +905,38 @@ elif sayfa == "📅 Aylık Özet":
                 else:
                     ay_sonu_tarih = f"{yil}-{str(ay_no+1).zfill(2)}-01"
                 usd_kur = kur_getir("USD", ay_sonu_tarih)
-                usd_grup_df[ay_adi] = usd_grup_df[ay_adi] / usd_kur
+                # None olan hücreleri koruyarak böl
+                usd_grup_df[ay_adi] = usd_grup_df[ay_adi].apply(
+                    lambda x: x / usd_kur if x is not None and pd.notna(x) else None
+                )
 
             # --- Sekmeler: TL ve USD ---
             dag_tab_tl, dag_tab_usd = st.tabs(["🇹🇷 TL Dağılım", "🇺🇸 USD Dağılım"])
 
             with dag_tab_tl:
                 st.dataframe(
-                    grup_df.style.format("{:,.0f}"),
+                    grup_df.style.format("{:,.0f}", na_rep=""),
                     use_container_width=True
                 )
 
             with dag_tab_usd:
                 st.dataframe(
-                    usd_grup_df.style.format("${:,.0f}"),
+                    usd_grup_df.style.format("${:,.0f}", na_rep=""),
                     use_container_width=True
                 )
 
             # --- Varlık bazında detay (açılır) ---
             with st.expander("📋 Varlık Bazında Detay"):
                 detay_df = dagilim_df[["Kod", "Tür", "Exposure", "PB"] + AY_ISIMLERI].copy()
+
+                # Gelecek ayları detay tablosunda da boş yap
+                if son_fiyat_tarihi and son_yil == yil:
+                    for i, ay_adi in enumerate(AY_ISIMLERI):
+                        if i + 1 > son_ay_no:
+                            detay_df[ay_adi] = None
+                elif son_fiyat_tarihi and son_yil < yil:
+                    for ay_adi in AY_ISIMLERI:
+                        detay_df[ay_adi] = None
 
                 # USD versiyonu: her ayın değerini o ayın kuruna böl
                 detay_usd_df = detay_df.copy()
@@ -724,14 +947,16 @@ elif sayfa == "📅 Aylık Özet":
                     else:
                         ay_sonu_tarih = f"{yil}-{str(ay_no+1).zfill(2)}-01"
                     usd_kur = kur_getir("USD", ay_sonu_tarih)
-                    detay_usd_df[ay_adi] = detay_usd_df[ay_adi] / usd_kur
+                    detay_usd_df[ay_adi] = detay_usd_df[ay_adi].apply(
+                        lambda x: x / usd_kur if x is not None and pd.notna(x) else None
+                    )
 
                 detay_tab_tl, detay_tab_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
 
                 with detay_tab_tl:
                     st.dataframe(
                         detay_df.style.format(
-                            {ay: "{:,.0f}" for ay in AY_ISIMLERI}
+                            {ay: "{:,.0f}" for ay in AY_ISIMLERI}, na_rep=""
                         ),
                         use_container_width=True
                     )
@@ -739,7 +964,7 @@ elif sayfa == "📅 Aylık Özet":
                 with detay_tab_usd:
                     st.dataframe(
                         detay_usd_df.style.format(
-                            {ay: "${:,.0f}" for ay in AY_ISIMLERI}
+                            {ay: "${:,.0f}" for ay in AY_ISIMLERI}, na_rep=""
                         ),
                         use_container_width=True
                     )
@@ -1257,16 +1482,50 @@ elif sayfa == "💱 Fiyat Güncelle":
     """, baglanti)
 
     son_fiyatlar = pd.read_sql("""
-        SELECT varlik_id, fiyat, tarih
-        FROM fiyat_gecmisi
-        WHERE id IN (
-            SELECT MAX(id) FROM fiyat_gecmisi GROUP BY varlik_id
-        )
+        SELECT f1.varlik_id, f1.fiyat, f1.tarih
+        FROM fiyat_gecmisi f1
+        INNER JOIN (
+            SELECT varlik_id, MAX(tarih) AS son_tarih
+            FROM fiyat_gecmisi
+            GROUP BY varlik_id
+        ) f2 ON f1.varlik_id = f2.varlik_id AND f1.tarih = f2.son_tarih
     """, baglanti)
 
     if df.empty:
         st.info("Henüz varlık eklenmemiş.")
     else:
+        # --- Fiyat geçmişi eksik varlık uyarısı ---
+        eksik_fiyat_fg = pd.read_sql("""
+            SELECT
+                v.kod, v.tur,
+                MIN(i.tarih) AS ilk_islem,
+                (SELECT MIN(f.tarih) FROM fiyat_gecmisi f WHERE f.varlik_id = v.id) AS ilk_fiyat
+            FROM varliklar v
+            JOIN islemler i ON v.id = i.varlik_id AND i.islem_turu = 'Alış'
+            JOIN (
+                SELECT varlik_id, SUM(CASE WHEN islem_turu = 'Alış' THEN adet ELSE -adet END) AS net
+                FROM islemler WHERE islem_turu IN ('Alış', 'Satış')
+                GROUP BY varlik_id HAVING net > 0
+            ) p ON v.id = p.varlik_id
+            WHERE v.tur NOT IN ('TL Mevduat', 'YP Mevduat')
+            GROUP BY v.id
+        """, veritabani_baglan())
+
+        if not eksik_fiyat_fg.empty:
+            uyarilar_fg = []
+            for _, r in eksik_fiyat_fg.iterrows():
+                if r["ilk_fiyat"] is None:
+                    uyarilar_fg.append(f"**{r['kod']}** ({r['tur']}) — ilk işlem: {r['ilk_islem']}, fiyat verisi yok")
+                else:
+                    from datetime import datetime as _dt
+                    islem_dt = _dt.strptime(r["ilk_islem"], "%Y-%m-%d")
+                    fiyat_dt = _dt.strptime(r["ilk_fiyat"], "%Y-%m-%d")
+                    bosluk = (fiyat_dt - islem_dt).days
+                    if bosluk > 3:
+                        uyarilar_fg.append(f"**{r['kod']}** ({r['tur']}) — ilk işlem: {r['ilk_islem']}, ilk fiyat: {r['ilk_fiyat']} ({bosluk} gün boşluk)")
+            if uyarilar_fg:
+                st.warning("⚠️ Fiyat verisi eksik:\n\n" + "\n\n".join(uyarilar_fg) + "\n\nAşağıdaki Geçmiş Veri Tamamla bölümünden çekin.")
+
         # ==========================================
         # OTOMATİK FİYAT ÇEKME BUTONLARI
         # ==========================================
