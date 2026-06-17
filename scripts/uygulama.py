@@ -95,27 +95,72 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Kenar çubuğu menü ---
-sayfa = st.sidebar.radio("Menü", [
-    "📊 Portföy",
-    "📈 Performans",
-    "📅 Aylık Özet",
-    "💱 Fiyat Güncelle",
-    "➕ Varlık Ekle",
-    "✏️ Varlık Düzenle",
-    "💰 İşlem Ekle",
-    "✏️ İşlem Düzenle",
-    "📋 İşlem Geçmişi",
-    "🗓️ Fiyat Geçmişi",
-])
+# ==========================================
+# ŞİFRE KORUMASI
+# ==========================================
+# admin_sifre  → tam erişim (sen)
+# izleyici_sifre → sadece görüntüleme (diğer kişi)
+# Şifreler Streamlit Cloud'da "secrets" bölümüne girilecek.
 
-# --- Bulut senkronizasyon butonu ---
-st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Bulut ile Senkronize Et"):
-    if senkronize_et():
-        st.sidebar.success("Senkronize edildi!")
-    else:
-        st.sidebar.warning("Senkronizasyon yapılamadı (bağlantıyı kontrol edin).")
+ADMIN_SIFRE    = st.secrets.get("ADMIN_SIFRE", "")
+IZLEYICI_SIFRE = st.secrets.get("IZLEYICI_SIFRE", "")
+
+if "erisim_seviyesi" not in st.session_state:
+    st.session_state.erisim_seviyesi = None  # henüz giriş yapılmadı
+
+if st.session_state.erisim_seviyesi is None:
+    st.title("🔐 Yatırım Takip")
+    girilen = st.text_input("Şifre:", type="password")
+    if st.button("Giriş"):
+        if girilen == ADMIN_SIFRE:
+            st.session_state.erisim_seviyesi = "admin"
+            st.rerun()
+        elif girilen == IZLEYICI_SIFRE:
+            st.session_state.erisim_seviyesi = "izleyici"
+            st.rerun()
+        else:
+            st.error("Yanlış şifre!")
+    st.stop()  # şifre girilmeden aşağısı çalışmaz
+
+# Kısayol: hangi modda olduğumuzu bir değişkene atalım
+ADMIN_MOD = (st.session_state.erisim_seviyesi == "admin")
+
+# --- Kenar çubuğu menü ---
+# Admin modunda tüm sayfalar görünür
+# İzleyici modunda sadece görüntüleme sayfaları görünür
+
+if ADMIN_MOD:
+    menu_secenekleri = [
+        "📊 Portföy",
+        "📈 Performans",
+        "📅 Aylık Özet",
+        "💱 Fiyat Güncelle",
+        "➕ Varlık Ekle",
+        "✏️ Varlık Düzenle",
+        "💰 İşlem Ekle",
+        "✏️ İşlem Düzenle",
+        "📋 İşlem Geçmişi",
+        "🗓️ Fiyat Geçmişi",
+    ]
+else:
+    menu_secenekleri = [
+        "📊 Portföy",
+        "📈 Performans",
+        "📅 Aylık Özet",
+        "📋 İşlem Geçmişi",
+        "🗓️ Fiyat Geçmişi",
+    ]
+
+sayfa = st.sidebar.radio("Menü", menu_secenekleri)
+
+# --- Bulut senkronizasyon butonu (sadece admin görür) ---
+if ADMIN_MOD:
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Bulut ile Senkronize Et"):
+        if senkronize_et():
+            st.sidebar.success("Senkronize edildi!")
+        else:
+            st.sidebar.warning("Senkronizasyon yapılamadı (bağlantıyı kontrol edin).")
 
 # ==========================================
 # SAYFA 1: PORTFÖY

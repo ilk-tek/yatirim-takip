@@ -1,0 +1,7 @@
+streamlit
+pandas
+yfinance
+libsql-experimental
+python-dotenv
+plotly
+requests
