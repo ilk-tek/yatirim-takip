@@ -17,7 +17,10 @@ import os
 import warnings
 from pathlib import Path
 
-import libsql
+try:
+    import libsql_experimental as libsql
+except ImportError:
+    import libsql
 from dotenv import load_dotenv
 
 # --- .env dosyasını oku (proje kök klasöründe) ---
