@@ -5,12 +5,13 @@
 # Diğer tüm dosyalar veritabanına buradan erişir.
 #
 # Çalışma mantığı:
-#   - Streamlit Cloud'da: doğrudan Turso bulut bağlantısı (replica olmadan)
-#   - Lokal'de: embedded replica (yerel kopya) ile hızlı okuma
+#   - Streamlit Cloud'da: temp dosya + sync (embedded replica)
+#   - Lokal'de: kalıcı embedded replica (yerel kopya) ile hızlı okuma
 # ==========================================
 
 import os
 import warnings
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -26,8 +27,36 @@ from dotenv import load_dotenv
 PROJE_KOKU = Path(__file__).resolve().parent.parent
 load_dotenv(PROJE_KOKU / ".env")
 
-TURSO_URL   = os.environ.get("TURSO_DATABASE_URL", "").strip()
-TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+
+def _streamlit_cloud_mi():
+    """Streamlit Cloud'da çalışıp çalışmadığımızı kontrol eder."""
+    return "/mount/src" in str(Path(__file__).resolve())
+
+
+def _secrets_oku():
+    """
+    TURSO_DATABASE_URL ve TURSO_AUTH_TOKEN değerlerini okur.
+    Önce Streamlit secrets (Cloud), sonra .env (lokal) dener.
+    """
+    turso_url = ""
+    turso_token = ""
+
+    # 1) Streamlit secrets dene (Cloud'da çalışır)
+    try:
+        import streamlit as st
+        turso_url = st.secrets.get("TURSO_DATABASE_URL", "")
+        turso_token = st.secrets.get("TURSO_AUTH_TOKEN", "")
+    except Exception:
+        pass
+
+    # 2) .env / os.environ dene (lokalde çalışır)
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL", "").strip()
+    if not turso_token:
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+
+    return turso_url, turso_token
+
 
 # pandas uyarısını gizle
 warnings.filterwarnings(
@@ -39,43 +68,42 @@ warnings.filterwarnings(
 _baglanti = None
 
 
-def _streamlit_cloud_mi():
-    """Streamlit Cloud'da çalışıp çalışmadığımızı kontrol eder."""
-    return "/mount/src" in str(Path(__file__).resolve())
-
-
 def baglan():
     """
     Turso veritabanına bağlanır ve TEK paylaşılan bağlantıyı döndürür.
-    - Streamlit Cloud'da: doğrudan bulut bağlantısı
-    - Lokalde: embedded replica (yerel kopya)
+    Her iki ortamda da embedded replica kullanır (Cloud'da temp dosya).
     """
     global _baglanti
     if _baglanti is None:
-        if not TURSO_URL or not TURSO_TOKEN:
+        turso_url, turso_token = _secrets_oku()
+
+        if not turso_url or not turso_token:
             raise RuntimeError(
                 "TURSO_DATABASE_URL veya TURSO_AUTH_TOKEN bulunamadı.\n"
                 f"Lütfen şu dosyayı doldurun: {PROJE_KOKU / '.env'}"
             )
 
         if _streamlit_cloud_mi():
-            # Streamlit Cloud: doğrudan Turso'ya bağlan
-            # libsql:// → https:// çevir (uzak bağlantı için gerekli)
-            uzak_url = TURSO_URL.replace("libsql://", "https://")
+            # Streamlit Cloud: temp dosya ile embedded replica
+            temp_db = os.path.join(tempfile.gettempdir(), "portfoy_replica.db")
             _baglanti = libsql.connect(
-                uzak_url,
-                auth_token=TURSO_TOKEN,
+                temp_db,
+                sync_url=turso_url,
+                auth_token=turso_token,
             )
         else:
-            # Lokal: embedded replica ile bağlan
+            # Lokal: kalıcı dosya ile embedded replica
             _KLASOR = Path.home() / ".yatirim_takip"
             _KLASOR.mkdir(parents=True, exist_ok=True)
             LOKAL_REPLIKA = str(_KLASOR / "portfoy_replica.db")
             _baglanti = libsql.connect(
                 LOKAL_REPLIKA,
-                sync_url=TURSO_URL,
-                auth_token=TURSO_TOKEN,
+                sync_url=turso_url,
+                auth_token=turso_token,
             )
+
+        # İlk bağlantıda buluttan veri çek
+        _baglanti.sync()
 
     return _baglanti
 
@@ -91,20 +119,10 @@ def sql_oku(sql, baglanti, params=None):
         return pd.read_sql(sql, baglanti, params=params)
     except Exception:
         # Çalışmazsa manuel çek (Streamlit Cloud)
-        try:
-            if params:
-                cursor = baglanti.execute(sql, list(params))
-            else:
-                cursor = baglanti.execute(sql)
-        except Exception:
-            # Bazı libsql versiyonlarında cursor() gerekir
-            cur = baglanti.cursor()
-            if params:
-                cur.execute(sql, list(params))
-            else:
-                cur.execute(sql)
-            cursor = cur
-
+        if params:
+            cursor = baglanti.execute(sql, list(params))
+        else:
+            cursor = baglanti.execute(sql)
         rows = cursor.fetchall()
         if not rows:
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
@@ -116,11 +134,10 @@ def sql_oku(sql, baglanti, params=None):
 def senkronize_et():
     """
     Bulut ile yerel kopya arasında senkronizasyon yapar.
-    Streamlit Cloud'da bu işlem atlanır (zaten doğrudan buluta bağlı).
+    Hata olursa uygulamayı çökertmez, sadece uyarı yazar.
     """
     try:
-        if not _streamlit_cloud_mi():
-            baglan().sync()
+        baglan().sync()
         return True
     except Exception as e:
         print(f"Senkronizasyon uyarısı: {e}")
