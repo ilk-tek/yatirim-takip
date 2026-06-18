@@ -132,6 +132,7 @@ ADMIN_MOD = (st.session_state.erisim_seviyesi == "admin")
 if ADMIN_MOD:
     menu_secenekleri = [
         "📊 Portföy",
+        "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
         "💱 Fiyat Güncelle",
@@ -145,6 +146,7 @@ if ADMIN_MOD:
 else:
     menu_secenekleri = [
         "📊 Portföy",
+        "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
         "📋 İşlem Geçmişi",
@@ -243,7 +245,6 @@ if sayfa == "📊 Portföy":
                 st.warning("⚠️ Fiyat verisi eksik:\n\n" + "\n\n".join(uyarilar) + "\n\n💱 Fiyat Güncelle → Geçmiş Veri Tamamla bölümünden çekin.")
 
         st.markdown("---")
-        st.subheader("Portföy Özeti")
 
         # ==========================================
         # BUGÜNKÜ DÖVİZ KURLARI (bir kere çek, hep kullan)
@@ -322,44 +323,8 @@ if sayfa == "📊 Portföy":
             ozet_df = pd.DataFrame(ozet)
 
             # ==========================================
-            # DAĞILIM TABLOLARI (Tür + Exposure)
+            # TOPLAM METRİKLER (en üstte)
             # ==========================================
-            tur_dagilim = ozet_df.groupby("Tür")["Değer (TL)"].sum().reset_index()
-            tur_dagilim["Yüzde"] = (tur_dagilim["Değer (TL)"] / tur_dagilim["Değer (TL)"].sum() * 100).round(1)
-            tur_dagilim = tur_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
-            tur_dagilim["Yüzde"] = tur_dagilim["Yüzde"].apply(lambda x: f"%{x}")
-            # TOPLAM satırı
-            tur_dagilim = pd.concat([tur_dagilim, pd.DataFrame([{
-                "Tür": "TOPLAM", "Değer (TL)": tur_dagilim["Değer (TL)"].sum(), "Yüzde": "%100.0"
-            }])], ignore_index=True)
-
-            exp_dagilim = ozet_df.groupby("Exposure")["Değer (TL)"].sum().reset_index()
-            exp_dagilim["Yüzde"] = (exp_dagilim["Değer (TL)"] / exp_dagilim["Değer (TL)"].sum() * 100).round(1)
-            exp_dagilim = exp_dagilim.sort_values("Değer (TL)", ascending=False).reset_index(drop=True)
-            exp_dagilim["Yüzde"] = exp_dagilim["Yüzde"].apply(lambda x: f"%{x}")
-            # TOPLAM satırı
-            exp_dagilim = pd.concat([exp_dagilim, pd.DataFrame([{
-                "Exposure": "TOPLAM", "Değer (TL)": exp_dagilim["Değer (TL)"].sum(), "Yüzde": "%100.0"
-            }])], ignore_index=True)
-
-            grafik_col1, grafik_col2 = st.columns(2)
-            with grafik_col1:
-                st.markdown("**Varlık Türü Bazında Dağılım**")
-                st.dataframe(
-                    tur_dagilim.style.format({"Değer (TL)": "{:,.0f}"}),
-                    use_container_width=True, hide_index=True
-                )
-            with grafik_col2:
-                st.markdown("**Exposure Bazında Dağılım**")
-                st.dataframe(
-                    exp_dagilim.style.format({"Değer (TL)": "{:,.0f}"}),
-                    use_container_width=True, hide_index=True
-                )
-
-            # ==========================================
-            # TOPLAM METRİKLER
-            # ==========================================
-            st.markdown("---")
             toplam_kar    = toplam_deger - portfoy_toplam_maliyet
             toplam_getiri = (toplam_kar / portfoy_toplam_maliyet * 100) if portfoy_toplam_maliyet else 0
 
@@ -378,119 +343,227 @@ if sayfa == "📊 Portföy":
             st.caption("ℹ️ Gerçekleşmemiş (unrealized) kâr/zarar. Maliyet: FIFO yöntemi, alış tarihindeki döviz kuru ile TL'ye çevrilir. Güncel Değer: adet × son fiyat × bugünkü kur.")
 
             # ==========================================
-            # HİYERARŞİK EXPANDER: Aracı Kurum → Tür → Exposure + Varlık
-            # ==========================================
-            # İşlem bazlı veri: aynı varlığın farklı aracı kurumlardaki
-            # pozisyonlarını AYRI gösterir.
-            # Sadece Değer (TL) ve Değer (USD) — Maliyet/K-Z yok
-            # (çünkü FIFO aracı kurum bazında ayrıştırılamaz).
+            # HİYERARŞİK PORTFÖY ÖZETİ: Exposure → Tür → Varlık
             # ==========================================
             st.markdown("---")
-            st.subheader("🏦 Aracı Kurum Bazında Portföy")
+            st.subheader("Portföy Özeti")
 
+            # Varlık bazlı aracı kurum bilgisi (en çok kullanılan)
             baglanti_ak = veritabani_baglan()
-            islem_bazli = sql_oku("""
-                SELECT
-                    v.id   AS varlik_id,
-                    v.kod, v.ad, v.tur, v.para_birimi, v.exposure,
-                    COALESCE(i.araci_kurum, '')      AS araci_kurum_ham,
-                    SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.adet
-                             ELSE -i.adet END)       AS net_adet
-                FROM islemler i
-                JOIN varliklar v ON v.id = i.varlik_id
-                WHERE i.islem_turu IN ('Alış', 'Satış')
-                GROUP BY v.id, i.araci_kurum
-                HAVING net_adet > 0
+            ak_bilgi = sql_oku("""
+                SELECT varlik_id,
+                       COALESCE(araci_kurum, '') AS araci_kurum,
+                       SUM(CASE WHEN islem_turu = 'Alış' THEN adet ELSE -adet END) AS net
+                FROM islemler
+                WHERE islem_turu IN ('Alış', 'Satış')
+                GROUP BY varlik_id, araci_kurum
+                HAVING net > 0
             """, baglanti_ak)
 
-            if not islem_bazli.empty:
-                # Boş aracı kurum → "Belirtilmemiş"
-                islem_bazli["Aracı Kurum"] = islem_bazli["araci_kurum_ham"].apply(
-                    lambda x: x if x else "Belirtilmemiş"
+            # Varlık → aracı kurum eşlemesi (en büyük pozisyon)
+            varlik_araci = {}
+            if not ak_bilgi.empty:
+                for vid in ak_bilgi["varlik_id"].unique():
+                    vid_df = ak_bilgi[ak_bilgi["varlik_id"] == vid]
+                    en_buyuk = vid_df.loc[vid_df["net"].idxmax()]
+                    ak = en_buyuk["araci_kurum"]
+                    varlik_araci[vid] = ak if ak else "Belirtilmemiş"
+
+            # ozet_df'e aracı kurum ekle
+            ozet_df["Aracı Kurum"] = ozet_df.apply(
+                lambda r: varlik_araci.get(
+                    df[df["kod"] == r["Kod"]]["id"].values[0], "Belirtilmemiş"
+                ) if len(df[df["kod"] == r["Kod"]]) > 0 else "Belirtilmemiş",
+                axis=1
+            )
+
+            portfoy_toplam_tl = ozet_df["Değer (TL)"].sum()
+
+            # --- Yardımcı fonksiyonlar ---
+            def pf_deger_str(filtre_df, toplam):
+                """Değer + pay string'i oluşturur."""
+                tl  = filtre_df["Değer (TL)"].sum()
+                usd = filtre_df["Değer (USD)"].sum()
+                pay = (tl / toplam * 100) if toplam else 0
+                return (
+                    f"**{tl:,.0f} TL** | "
+                    f"**${usd:,.0f}** | "
+                    f"Pay: **%{pay:.1f}**"
                 )
 
-                # Her satır için değer hesapla
-                deger_tl  = []
-                deger_usd = []
-                for _, r in islem_bazli.iterrows():
-                    pb  = r["para_birimi"] if r["para_birimi"] else "TRY"
-                    kur = bugunun_kuru(pb)
+            # --- Exposure → Tür → Varlık expander'ları ---
+            exposurelar = sorted(ozet_df["Exposure"].unique())
 
-                    if r["tur"] in MEVDUAT_TURLERI:
-                        fiyat = 1.0
-                    else:
-                        fiyat = guncel_fiyatlar.get(r["varlik_id"], 0)
+            for exp in exposurelar:
+                exp_df = ozet_df[ozet_df["Exposure"] == exp]
 
-                    d = r["net_adet"] * fiyat * kur
-                    deger_tl.append(d)
-                    deger_usd.append(d / usd_kuru_bugun)
+                with st.expander(f"📂 {exp}  —  {pf_deger_str(exp_df, portfoy_toplam_tl)}"):
+                    turler = sorted(exp_df["Tür"].unique())
 
-                islem_bazli["Değer (TL)"]  = deger_tl
-                islem_bazli["Değer (USD)"] = deger_usd
+                    for tur in turler:
+                        tur_df = exp_df[exp_df["Tür"] == tur]
 
-                # --- Yardımcı fonksiyonlar ---
-                def deger_ozet(df_filtre):
-                    """Değer toplamlarını döndürür."""
-                    return {
-                        "Değer (TL)"  : df_filtre["Değer (TL)"].sum(),
-                        "Değer (USD)" : df_filtre["Değer (USD)"].sum(),
-                    }
-
-                def deger_str(oz):
-                    """Özet sözlüğünü okunabilir string'e çevirir."""
-                    return (
-                        f"Değer: **{oz['Değer (TL)']:,.0f} TL** | "
-                        f"USD: **${oz['Değer (USD)']:,.0f}**"
-                    )
-
-                # --- Expander'lar ---
-                araci_kurumlar = sorted(islem_bazli["Aracı Kurum"].unique())
-
-                for araci in araci_kurumlar:
-                    ak_df = islem_bazli[islem_bazli["Aracı Kurum"] == araci]
-                    ak_oz = deger_ozet(ak_df)
-
-                    with st.expander(f"🏦 {araci}  —  {deger_str(ak_oz)}"):
-                        turler = sorted(ak_df["tur"].unique())
-
-                        for tur in turler:
-                            tur_df = ak_df[ak_df["tur"] == tur]
-                            tur_oz = deger_ozet(tur_df)
-
-                            with st.expander(f"📂 {tur}  —  {deger_str(tur_oz)}"):
-                                # Exposure özet tablosu
-                                exp_grp = tur_df.groupby("exposure").agg(
-                                    DegerTL=("Değer (TL)", "sum"),
-                                    DegerUSD=("Değer (USD)", "sum"),
-                                ).reset_index()
-                                exp_grp.columns = ["Exposure", "Değer (TL)", "Değer (USD)"]
-
-                                st.markdown("**Exposure Özeti**")
-                                st.dataframe(
-                                    exp_grp.style.format({
-                                        "Değer (TL)"  : "{:,.0f}",
-                                        "Değer (USD)" : "${:,.0f}",
-                                    }),
-                                    use_container_width=True
-                                )
-
-                                # Varlık listesi
-                                st.markdown("**Varlık Listesi**")
-                                goster = tur_df[["kod", "ad", "para_birimi", "exposure",
-                                                  "net_adet", "Değer (TL)", "Değer (USD)"]].copy()
-                                goster.columns = ["Kod", "Ad", "PB", "Exposure",
-                                                  "Adet", "Değer (TL)", "Değer (USD)"]
-                                st.dataframe(
-                                    goster.style.format({
-                                        "Adet"        : "{:,.4f}",
-                                        "Değer (TL)"  : "{:,.0f}",
-                                        "Değer (USD)" : "${:,.0f}",
-                                    }),
-                                    use_container_width=True
-                                )
+                        with st.expander(f"📄 {tur}  —  {pf_deger_str(tur_df, portfoy_toplam_tl)}"):
+                            goster = tur_df[["Kod", "Ad", "PB", "Exposure",
+                                             "Adet", "Değer (TL)", "Değer (USD)",
+                                             "Aracı Kurum"]].copy()
+                            goster = goster.sort_values("Değer (TL)", ascending=False)
+                            st.dataframe(
+                                goster.style.format({
+                                    "Adet"        : "{:,.4f}",
+                                    "Değer (TL)"  : "{:,.0f}",
+                                    "Değer (USD)" : "${:,.0f}",
+                                }),
+                                use_container_width=True, hide_index=True
+                            )
 
         else:
             st.info("Henüz işlem girilmemiş.")
+
+# ==========================================
+# SAYFA: ARACI KURUM BAZINDA PORTFÖY
+# ==========================================
+elif sayfa == "🏦 Aracı Kurum":
+    st.title("🏦 Aracı Kurum Bazında Portföy")
+    st.markdown("---")
+
+    baglanti = veritabani_baglan()
+
+    # ==========================================
+    # BUGÜNKÜ DÖVİZ KURLARI
+    # ==========================================
+    usd_kuru_bugun = bugunun_kuru("USD")
+
+    # Kurları kenar çubuğunda göster
+    eur_kuru_bugun = bugunun_kuru("EUR")
+    gbp_kuru_bugun = bugunun_kuru("GBP")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**💱 Güncel Kurlar**")
+    st.sidebar.markdown(f"USD/TRY: **{usd_kuru_bugun:.4f}**")
+    st.sidebar.markdown(f"EUR/TRY: **{eur_kuru_bugun:.4f}**")
+    st.sidebar.markdown(f"GBP/TRY: **{gbp_kuru_bugun:.4f}**")
+
+    # Son fiyatları çek
+    son_fiyatlar_ak = sql_oku("""
+        SELECT f1.varlik_id, f1.fiyat
+        FROM fiyat_gecmisi f1
+        INNER JOIN (
+            SELECT varlik_id, MAX(tarih) AS son_tarih
+            FROM fiyat_gecmisi
+            GROUP BY varlik_id
+        ) f2 ON f1.varlik_id = f2.varlik_id AND f1.tarih = f2.son_tarih
+    """, baglanti)
+
+    guncel_fiyatlar_ak = {}
+    for _, row in son_fiyatlar_ak.iterrows():
+        guncel_fiyatlar_ak[row["varlik_id"]] = row["fiyat"]
+
+    # İşlem bazlı veri: aynı varlığın farklı aracı kurumlardaki
+    # pozisyonlarını AYRI gösterir.
+    # Sadece Değer (TL) ve Değer (USD) — Maliyet/K-Z yok
+    # (çünkü FIFO aracı kurum bazında ayrıştırılamaz).
+    islem_bazli = sql_oku("""
+        SELECT
+            v.id   AS varlik_id,
+            v.kod, v.ad, v.tur, v.para_birimi, v.exposure,
+            COALESCE(i.araci_kurum, '')      AS araci_kurum_ham,
+            SUM(CASE WHEN i.islem_turu = 'Alış' THEN i.adet
+                     ELSE -i.adet END)       AS net_adet
+        FROM islemler i
+        JOIN varliklar v ON v.id = i.varlik_id
+        WHERE i.islem_turu IN ('Alış', 'Satış')
+        GROUP BY v.id, i.araci_kurum
+        HAVING net_adet > 0
+    """, baglanti)
+
+    if islem_bazli.empty:
+        st.info("Henüz işlem girilmemiş.")
+    else:
+        # Boş aracı kurum → "Belirtilmemiş"
+        islem_bazli["Aracı Kurum"] = islem_bazli["araci_kurum_ham"].apply(
+            lambda x: x if x else "Belirtilmemiş"
+        )
+
+        # Her satır için değer hesapla
+        deger_tl  = []
+        deger_usd = []
+        for _, r in islem_bazli.iterrows():
+            pb  = r["para_birimi"] if r["para_birimi"] else "TRY"
+            kur = bugunun_kuru(pb)
+
+            if r["tur"] in MEVDUAT_TURLERI:
+                fiyat = 1.0
+            else:
+                fiyat = guncel_fiyatlar_ak.get(r["varlik_id"], 0)
+
+            d = r["net_adet"] * fiyat * kur
+            deger_tl.append(d)
+            deger_usd.append(d / usd_kuru_bugun)
+
+        islem_bazli["Değer (TL)"]  = deger_tl
+        islem_bazli["Değer (USD)"] = deger_usd
+
+        # --- Yardımcı fonksiyonlar ---
+        def deger_ozet(df_filtre):
+            """Değer toplamlarını döndürür."""
+            return {
+                "Değer (TL)"  : df_filtre["Değer (TL)"].sum(),
+                "Değer (USD)" : df_filtre["Değer (USD)"].sum(),
+            }
+
+        def deger_str(oz):
+            """Özet sözlüğünü okunabilir string'e çevirir."""
+            return (
+                f"Değer: **{oz['Değer (TL)']:,.0f} TL** | "
+                f"USD: **${oz['Değer (USD)']:,.0f}**"
+            )
+
+        # --- Expander'lar ---
+        araci_kurumlar = sorted(islem_bazli["Aracı Kurum"].unique())
+
+        for araci in araci_kurumlar:
+            ak_df = islem_bazli[islem_bazli["Aracı Kurum"] == araci]
+            ak_oz = deger_ozet(ak_df)
+
+            with st.expander(f"🏦 {araci}  —  {deger_str(ak_oz)}"):
+                turler = sorted(ak_df["tur"].unique())
+
+                for tur in turler:
+                    tur_df = ak_df[ak_df["tur"] == tur]
+                    tur_oz = deger_ozet(tur_df)
+
+                    with st.expander(f"📂 {tur}  —  {deger_str(tur_oz)}"):
+                        # Exposure özet tablosu
+                        exp_grp = tur_df.groupby("exposure").agg(
+                            DegerTL=("Değer (TL)", "sum"),
+                            DegerUSD=("Değer (USD)", "sum"),
+                        ).reset_index()
+                        exp_grp.columns = ["Exposure", "Değer (TL)", "Değer (USD)"]
+
+                        st.markdown("**Exposure Özeti**")
+                        st.dataframe(
+                            exp_grp.style.format({
+                                "Değer (TL)"  : "{:,.0f}",
+                                "Değer (USD)" : "${:,.0f}",
+                            }),
+                            use_container_width=True
+                        )
+
+                        # Varlık listesi
+                        st.markdown("**Varlık Listesi**")
+                        goster = tur_df[["kod", "ad", "para_birimi", "exposure",
+                                          "net_adet", "Değer (TL)", "Değer (USD)"]].copy()
+                        goster.columns = ["Kod", "Ad", "PB", "Exposure",
+                                          "Adet", "Değer (TL)", "Değer (USD)"]
+                        st.dataframe(
+                            goster.style.format({
+                                "Adet"        : "{:,.4f}",
+                                "Değer (TL)"  : "{:,.0f}",
+                                "Değer (USD)" : "${:,.0f}",
+                            }),
+                            use_container_width=True
+                        )
+
 
 # ==========================================
 # SAYFA 2: PERFORMANS
@@ -498,6 +571,38 @@ if sayfa == "📊 Portföy":
 elif sayfa == "📈 Performans":
     st.title("📈 Performans Raporu")
     st.markdown("---")
+
+    # ==========================================
+    # TWR AÇIKLAMASI (detaylı)
+    # ==========================================
+    with st.expander("ℹ️ TWR (Time-Weighted Return) Nedir?", expanded=False):
+        st.markdown("""
+**TWR (Time-Weighted Return — Zaman Ağırlıklı Getiri)**, bir varlığın fiyat performansını ölçer.
+Yapılan yatırım tutarından bağımsız olarak varlıkların performanslarını birbiriyle karşılaştırmak
+amacıyla kullanılır. Örneğin 10.000 TL yatırım yapılan bir fon ile 100.000 TL yatırım yapılan
+bir hisse senedinin getiri oranları, yatırım büyüklüğünden etkilenmeden karşılaştırılabilir.
+
+**Nasıl hesaplanır?**
+- Varlığın `fiyat_gecmisi` tablosundaki tüm fiyat kayıtları kronolojik sıralanır.
+- Ardışık iki fiyat arasındaki oran hesaplanır (günlük getiri = bugünkü fiyat / dünkü fiyat).
+- Tüm günlük getiriler birbiriyle çarpılarak toplam getiri bulunur (chain-linking yöntemi).
+
+**TWR hangi tarihten itibaren hesaplanır?**
+- TWR, varlığın **ilk fiyat kaydından son fiyat kaydına** kadar hesaplanır.
+- Bir varlığı alıp satıp tekrar aldığınızda, fiyat geçmişi kesintisiz devam ettiği sürece
+  TWR tüm dönem boyunca hesaplanır. Pozisyon kapanması TWR hesabını sıfırlamaz.
+
+**Fiyat bilgisi olmayan günler ne olur?**
+- Sadece `fiyat_gecmisi` tablosunda kaydı olan günler hesaplamaya dahil edilir.
+- Fiyat kaydı olmayan günler atlanır; bu durum TWR sonucunu etkilemez çünkü
+  mevcut iki fiyat arasındaki oran zaten o aradaki toplam değişimi yansıtır.
+
+**TWR (TL) ve TWR (PB) farkı:**
+- **TWR (TL):** Fiyat her gün o günkü döviz kuru ile TL'ye çevrilir, kur etkisi dahildir.
+- **TWR (PB):** Varlığın kendi para birimindeki (USD, EUR vb.) fiyat değişimi. TRY varlıklarda ikisi aynıdır.
+
+**Mevduat hesapları için TWR hesaplanmaz.**
+""")
 
     donem = st.selectbox("Dönem seçin:", [
         "bu_ay", "son_3_ay", "son_6_ay", "bu_yil", "tum_zamanlar"
@@ -595,9 +700,7 @@ elif sayfa == "📈 Performans":
                 goster = exp_df[["Kod", "Ad", "Tür", "PB", "TWR % (TL)", "TWR % (PB)", "Yıllık (TL)", "Yıllık (PB)", "Son Fiyat", "Güncelleme"]].copy()
                 st.dataframe(goster.style.apply(renk_exp, axis=1), use_container_width=True)
 
-        st.caption("ℹ️ TWR (Time-Weighted Return): fiyat bazlı getiri, nakit giriş/çıkışından bağımsız — fonun/varlığın kendisinin ürettiği getiriyi ölçer. "
-                   "TWR (TL): her günün fiyatı o günkü döviz kuru ile TL'ye çevrilir, kur etkisi dahildir. "
-                   "TWR (PB): varlığın kendi para birimindeki fiyat değişimi. TRY varlıklarda ikisi aynıdır.")
+        # TWR açıklaması sayfanın üstünde yer almaktadır.
 
 # ==========================================
 # SAYFA 3: AYLIK ÖZET
@@ -607,58 +710,6 @@ elif sayfa == "📅 Aylık Özet":
     st.markdown("---")
 
     yil = st.selectbox("Yıl seçin:", [2024, 2025, 2026, 2027], index=2)
-
-    # ==========================================
-    # NAKİT AKIŞI GİRİŞ FORMU
-    # ==========================================
-    with st.expander("💸 Aylık Dış Giriş / Çıkış Girişi", expanded=False):
-        st.caption("Portföye dışarıdan giren veya çıkan toplam nakit miktarını ay bazında girin.")
-
-        baglanti = veritabani_baglan()
-        mevcut_akislar = sql_oku("""
-            SELECT ay, dis_giris, dis_cikis, notlar
-            FROM portfoy_akislari
-            WHERE yil = ?
-            ORDER BY ay
-        """, baglanti, params=(yil,))
-
-        # Mevcut kayıtları göster
-        if not mevcut_akislar.empty:
-            st.dataframe(
-                mevcut_akislar.style.format({
-                    "dis_giris": "{:,.0f}",
-                    "dis_cikis": "{:,.0f}",
-                }),
-                use_container_width=True, hide_index=True
-            )
-
-        # Yeni giriş formu
-        with st.form("akis_formu"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                akis_ay = st.selectbox("Ay", list(range(1, 13)),
-                    format_func=lambda x: f"{x} — {['', 'Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'][x]}")
-            with col2:
-                akis_giris = st.number_input("Dış Giriş (TL)", min_value=0.0, step=1000.0, format="%.2f")
-            with col3:
-                akis_cikis = st.number_input("Dış Çıkış (TL)", min_value=0.0, step=1000.0, format="%.2f")
-            akis_notlar = st.text_input("Notlar", placeholder="İsteğe bağlı")
-
-            akis_kaydet = st.form_submit_button("💾 Kaydet")
-
-            if akis_kaydet:
-                baglanti = veritabani_baglan()
-                cursor = baglanti.cursor()
-                cursor.execute("""
-                    INSERT OR REPLACE INTO portfoy_akislari (yil, ay, dis_giris, dis_cikis, notlar)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (yil, akis_ay, akis_giris, akis_cikis, akis_notlar))
-                baglanti.commit()
-                senkronize_et()
-                st.success(f"✅ {yil}-{str(akis_ay).zfill(2)} akışı kaydedildi!")
-                import time
-                time.sleep(1)
-                st.rerun()
 
     st.markdown("---")
 
@@ -737,6 +788,26 @@ elif sayfa == "📅 Aylık Özet":
         tl_dolu  = ozet_df.dropna(subset=["Ay Sonu"])
         usd_dolu = usd_ozet_df.dropna(subset=["Ay Sonu"])
 
+        # ==========================================
+        # METRİKLER (tabloların üstünde)
+        # ==========================================
+        # Son ay getirisi
+        son_ay_getiri_tl  = tl_dolu["Getiri"].iloc[-1]  if not tl_dolu.empty else 0
+        son_ay_getiri_usd = usd_dolu["Getiri"].iloc[-1] if not usd_dolu.empty else 0
+        son_ay_adi        = tl_dolu["Ay"].iloc[-1]       if not tl_dolu.empty else "—"
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Yılbaşından Bugüne Getiri", f"{tl_dolu['Getiri'].sum():,.0f} TL")
+        col2.metric(f"Son Ay Getirisi ({son_ay_adi})", f"{son_ay_getiri_tl:,.0f} TL")
+        col3.metric("Güncel Değer",              f"{tl_dolu['Ay Sonu'].iloc[-1]:,.0f} TL" if not tl_dolu.empty else "—")
+
+        col4, col5, col6 = st.columns(3)
+        col4.metric("Yılbaşından Bugüne Getiri (USD)", f"${usd_dolu['Getiri'].sum():,.0f}")
+        col5.metric(f"Son Ay Getirisi ({son_ay_adi})", f"${son_ay_getiri_usd:,.0f}")
+        col6.metric("Güncel Değer (USD)",           f"${usd_dolu['Ay Sonu'].iloc[-1]:,.0f}" if not usd_dolu.empty else "—")
+
+        st.markdown("---")
+
         # --- Sekmeler: TL ve USD ---
         tab_tl, tab_usd = st.tabs(["🇹🇷 TL Bazında", "🇺🇸 USD Bazında"])
 
@@ -752,12 +823,6 @@ elif sayfa == "📅 Aylık Özet":
                 use_container_width=True
             )
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam Dış Giriş", f"{tl_dolu['Dış Giriş'].sum():,.0f} TL")
-            col2.metric("Toplam Dış Çıkış", f"{tl_dolu['Dış Çıkış'].sum():,.0f} TL")
-            col3.metric("Toplam Getiri",     f"{tl_dolu['Getiri'].sum():,.0f} TL")
-            col4.metric("Yıl Sonu Değer",    f"{tl_dolu['Ay Sonu'].iloc[-1]:,.0f} TL" if not tl_dolu.empty else "—")
-
         with tab_usd:
             st.dataframe(
                 usd_ozet_df.style.format({
@@ -770,26 +835,37 @@ elif sayfa == "📅 Aylık Özet":
                 use_container_width=True
             )
 
-            col5, col6, col7, col8 = st.columns(4)
-            col5.metric("Toplam Dış Giriş", f"${usd_dolu['Dış Giriş'].sum():,.0f}")
-            col6.metric("Toplam Dış Çıkış", f"${usd_dolu['Dış Çıkış'].sum():,.0f}")
-            col7.metric("Toplam Getiri",     f"${usd_dolu['Getiri'].sum():,.0f}")
-            col8.metric("Yıl Sonu Değer",    f"${usd_dolu['Ay Sonu'].iloc[-1]:,.0f}" if not usd_dolu.empty else "—")
-
         st.caption("ℹ️ Getiri = Ay Sonu Değer − Ay Başı Değer − Dış Giriş + Dış Çıkış. "
                    "Dış nakit akışları düzeltilmiştir, böylece portföye yeni para koymak getiri olarak sayılmaz. "
                    "USD versiyonunda her ayın değeri o ayın kendi USD kuru ile çevrilir.")
 
+        # ==========================================
+        # AYLIK GETİRİ GRAFİKLERİ (TL + USD)
+        # ==========================================
         st.markdown("---")
         import plotly.express as px
-        fig = px.bar(
-            ozet_df,
-            x="Ay",
-            y=["Dış Giriş", "Getiri"],
-            title=f"{yil} Yılı — Aylık Giriş ve Getiri (TL)",
-            barmode="group"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+
+        grafik_col_tl, grafik_col_usd = st.columns(2)
+
+        with grafik_col_tl:
+            fig_tl = px.bar(
+                ozet_df,
+                x="Ay",
+                y="Getiri",
+                title=f"{yil} Yılı — Aylık Getiri (TL)",
+            )
+            fig_tl.update_traces(marker_color="#1f77b4")
+            st.plotly_chart(fig_tl, use_container_width=True)
+
+        with grafik_col_usd:
+            fig_usd = px.bar(
+                usd_ozet_df,
+                x="Ay",
+                y="Getiri",
+                title=f"{yil} Yılı — Aylık Getiri (USD)",
+            )
+            fig_usd.update_traces(marker_color="#2ca02c")
+            st.plotly_chart(fig_usd, use_container_width=True)
 
         # ==========================================
         # DAĞILIM VERİSİNİ HESAPLA (ay detayı + matris için ortak)
@@ -1014,6 +1090,68 @@ elif sayfa == "📅 Aylık Özet":
                         ),
                         use_container_width=True
                     )
+
+    # ==========================================
+    # NAKİT AKIŞI GİRİŞ FORMU (sayfanın en altı)
+    # ==========================================
+    st.markdown("---")
+    with st.expander("💸 Aylık Dış Giriş / Çıkış Girişi", expanded=False):
+        st.caption("Portföye dışarıdan giren veya çıkan toplam nakit miktarını ay bazında girin.")
+
+        baglanti = veritabani_baglan()
+        mevcut_akislar = sql_oku("""
+            SELECT ay, dis_giris, dis_cikis, notlar
+            FROM portfoy_akislari
+            WHERE yil = ?
+            ORDER BY ay
+        """, baglanti, params=(yil,))
+
+        # Mevcut kayıtları göster (diptoplam satırıyla)
+        if not mevcut_akislar.empty:
+            # Diptoplam satırı ekle
+            toplam_satir = pd.DataFrame([{
+                "ay": "TOPLAM",
+                "dis_giris": mevcut_akislar["dis_giris"].sum(),
+                "dis_cikis": mevcut_akislar["dis_cikis"].sum(),
+                "notlar": "",
+            }])
+            akislar_goster = pd.concat([mevcut_akislar, toplam_satir], ignore_index=True)
+
+            st.dataframe(
+                akislar_goster.style.format({
+                    "dis_giris": "{:,.0f}",
+                    "dis_cikis": "{:,.0f}",
+                }),
+                use_container_width=True, hide_index=True
+            )
+
+        # Yeni giriş formu
+        with st.form("akis_formu"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                akis_ay = st.selectbox("Ay", list(range(1, 13)),
+                    format_func=lambda x: f"{x} — {['', 'Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'][x]}")
+            with col2:
+                akis_giris = st.number_input("Dış Giriş (TL)", min_value=0.0, step=1000.0, format="%.2f")
+            with col3:
+                akis_cikis = st.number_input("Dış Çıkış (TL)", min_value=0.0, step=1000.0, format="%.2f")
+            akis_notlar = st.text_input("Notlar", placeholder="İsteğe bağlı")
+
+            akis_kaydet = st.form_submit_button("💾 Kaydet")
+
+            if akis_kaydet:
+                baglanti = veritabani_baglan()
+                cursor = baglanti.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO portfoy_akislari (yil, ay, dis_giris, dis_cikis, notlar)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (yil, akis_ay, akis_giris, akis_cikis, akis_notlar))
+                baglanti.commit()
+                senkronize_et()
+                st.success(f"✅ {yil}-{str(akis_ay).zfill(2)} akışı kaydedildi!")
+                import time
+                time.sleep(1)
+                st.rerun()
 
 # ==========================================
 # SAYFA 4: VARLIK EKLE
@@ -1410,7 +1548,73 @@ elif sayfa == "📋 İşlem Geçmişi":
     if df.empty:
         st.info("Henüz işlem girilmemiş.")
     else:
-        st.dataframe(df, use_container_width=True)
+        # ==========================================
+        # FİLTRELER
+        # ==========================================
+        with st.expander("🔍 Filtrele", expanded=False):
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+
+            with f_col1:
+                varlik_secenekleri_f = ["Tümü"] + sorted(df["kod"].unique().tolist())
+                filtre_varlik = st.multiselect("Varlık", varlik_secenekleri_f, default=["Tümü"], key="f_varlik")
+
+            with f_col2:
+                islem_turu_secenekleri = ["Tümü"] + sorted(df["islem_turu"].unique().tolist())
+                filtre_islem_turu = st.multiselect("İşlem Türü", islem_turu_secenekleri, default=["Tümü"], key="f_islem_turu")
+
+            with f_col3:
+                ak_secenekleri = ["Tümü"] + sorted([x for x in df["araci_kurum"].unique().tolist() if x])
+                filtre_ak = st.multiselect("Aracı Kurum", ak_secenekleri, default=["Tümü"], key="f_ak")
+
+            with f_col4:
+                tarih_baslangic = st.date_input("Başlangıç", value=pd.to_datetime(df["tarih"].min()), key="f_tarih_bas")
+                tarih_bitis     = st.date_input("Bitiş", value=pd.to_datetime(df["tarih"].max()), key="f_tarih_bit")
+
+        # Filtreleri uygula
+        filtreli_df = df.copy()
+
+        if "Tümü" not in filtre_varlik:
+            filtreli_df = filtreli_df[filtreli_df["kod"].isin(filtre_varlik)]
+
+        if "Tümü" not in filtre_islem_turu:
+            filtreli_df = filtreli_df[filtreli_df["islem_turu"].isin(filtre_islem_turu)]
+
+        if "Tümü" not in filtre_ak:
+            filtreli_df = filtreli_df[filtreli_df["araci_kurum"].isin(filtre_ak)]
+
+        filtreli_df = filtreli_df[
+            (filtreli_df["tarih"] >= str(tarih_baslangic)) &
+            (filtreli_df["tarih"] <= str(tarih_bitis))
+        ]
+
+        st.caption(f"Toplam {len(filtreli_df)} işlem gösteriliyor (toplam: {len(df)})")
+
+        # ==========================================
+        # TABLO
+        # ==========================================
+        st.dataframe(
+            filtreli_df.style.format({
+                "adet"  : "{:,.4f}",
+                "fiyat" : "{:,.4f}",
+                "tutar" : "{:,.2f}",
+            }),
+            use_container_width=True, hide_index=True
+        )
+
+        # ==========================================
+        # EXCEL EXPORT
+        # ==========================================
+        import io
+        buffer = io.BytesIO()
+        filtreli_df.to_excel(buffer, index=False, engine="openpyxl")
+        buffer.seek(0)
+
+        st.download_button(
+            label="📥 Excel'e Aktar",
+            data=buffer,
+            file_name="islem_gecmisi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 # ==========================================
 # SAYFA 9: FİYAT GEÇMİŞİ
