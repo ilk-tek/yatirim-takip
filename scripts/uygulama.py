@@ -150,7 +150,6 @@ else:
         "📈 Performans",
         "📅 Aylık Özet",
         "📋 İşlem Geçmişi",
-        "🗓️ Fiyat Geçmişi",
     ]
 
 sayfa = st.sidebar.radio("Menü", menu_secenekleri)
