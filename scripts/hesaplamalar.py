@@ -562,6 +562,108 @@ def aylik_dagilim_hesapla(yil):
     return pd.DataFrame(sonuclar) if sonuclar else pd.DataFrame()
 
 
+# ==========================================
+# DÖNEMSEL KARŞILAŞTIRMA
+# ==========================================
+# İki tarih arasındaki varlık bazında TL değer değişimini hesaplar.
+# Hesaplama mantığı aylik_dagilim_hesapla ile birebir aynı:
+#   değer = son_fiyat × net_adet × kur
+# Tek fark: ay sonu yerine kullanıcının seçtiği iki tarih kullanılır.
+# tarih < ? yerine tarih <= ? kullanılır (gün sonu değeri için).
+# ==========================================
+
+def donemsel_karsilastirma_hesapla(baslangic_tarih, bitis_tarih):
+    """
+    İki tarih arasındaki varlık bazında TL değerlerini hesaplar.
+
+    Parametreler:
+      baslangic_tarih : str ("YYYY-MM-DD") — karşılaştırma başlangıcı
+      bitis_tarih     : str ("YYYY-MM-DD") — karşılaştırma bitişi
+
+    Dönen DataFrame sütunları:
+      Kod, Tür, Exposure, PB, Başlangıç, Bitiş
+
+    Her iki tarih için:
+      - net_adet = o tarihe kadar (dahil) yapılan Alış − Satış toplamı
+      - fiyat   = o tarihten (dahil) önceki en son fiyat kaydı
+      - kur     = kur_getir(para_birimi, tarih)
+      - değer   = fiyat × net_adet × kur
+    """
+    baglanti  = veritabani_baglan()
+    varliklar = sql_oku(
+        "SELECT id, kod, ad, tur, para_birimi, exposure FROM varliklar",
+        baglanti
+    )
+
+    sonuclar = []
+
+    for _, v in varliklar.iterrows():
+        pb = v["para_birimi"] if v["para_birimi"] else "TRY"
+
+        bas_deger = 0.0
+        bit_deger = 0.0
+
+        # --- Her iki tarih için aynı hesaplama ---
+        for tarih_str, hedef in [(baslangic_tarih, "bas"), (bitis_tarih, "bit")]:
+            baglanti = veritabani_baglan()
+
+            # Net adet (tarih <= ? : o gün dahil)
+            adet_df = sql_oku("""
+                SELECT SUM(CASE WHEN islem_turu = 'Alış' THEN adet
+                                ELSE -adet END) as net_adet
+                FROM islemler
+                WHERE varlik_id = ? AND tarih <= ?
+                  AND islem_turu IN ('Alış', 'Satış')
+            """, baglanti, params=(v["id"], tarih_str))
+
+            net_adet = adet_df.iloc[0]["net_adet"] if not adet_df.empty else 0
+            net_adet = net_adet or 0
+
+            if net_adet <= 0:
+                # Bu tarihte pozisyon yok
+                if hedef == "bas":
+                    bas_deger = 0.0
+                else:
+                    bit_deger = 0.0
+                continue
+
+            kur = kur_getir(pb, tarih_str)
+
+            if v["tur"] in MEVDUAT_TURLERI:
+                # Mevduat: fiyat her zaman 1
+                deger = round(net_adet * 1.0 * kur, 2)
+            else:
+                # Normal varlık: fiyat_gecmisi'nden son fiyat (tarih <= ?)
+                fiyat_df = sql_oku("""
+                    SELECT fiyat FROM fiyat_gecmisi
+                    WHERE varlik_id = ? AND tarih <= ?
+                    ORDER BY tarih DESC LIMIT 1
+                """, baglanti, params=(v["id"], tarih_str))
+
+                if fiyat_df.empty:
+                    deger = 0.0
+                else:
+                    deger = round(fiyat_df.iloc[0]["fiyat"] * net_adet * kur, 2)
+
+            if hedef == "bas":
+                bas_deger = deger
+            else:
+                bit_deger = deger
+
+        # Sadece en az bir tarihte değeri olan varlıkları dahil et
+        if bas_deger > 0 or bit_deger > 0:
+            sonuclar.append({
+                "Kod"       : v["kod"],
+                "Tür"       : v["tur"],
+                "Exposure"  : v["exposure"] if v["exposure"] else "—",
+                "PB"        : pb,
+                "Başlangıç" : bas_deger,
+                "Bitiş"     : bit_deger,
+            })
+
+    return pd.DataFrame(sonuclar) if sonuclar else pd.DataFrame()
+
+
 if __name__ == "__main__":
     print("TWR testi:")
     print("GARAN TWR:", twr_hesapla(1))

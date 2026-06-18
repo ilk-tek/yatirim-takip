@@ -16,6 +16,7 @@ from hesaplamalar import (
     performans_ozeti, twr_hesapla, yilliklandir,
     mevduat_deger_hesapla, aylik_portfoy_ozeti,
     aylik_dagilim_hesapla, AY_ISIMLERI,
+    donemsel_karsilastirma_hesapla,
     fifo_maliyet_hesapla, MEVDUAT_TURLERI,
     kur_getir, bugunun_kuru
 )
@@ -1089,6 +1090,152 @@ elif sayfa == "📅 Aylık Özet":
                         ),
                         use_container_width=True
                     )
+
+        # ==========================================
+        # DÖNEMSEL KARŞILAŞTIRMA
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🔄 Dönemsel Karşılaştırma")
+        st.caption("İki tarih arasındaki varlık değer değişimini kategori bazında gösterir.")
+
+        dk_col1, dk_col2 = st.columns(2)
+        with dk_col1:
+            dk_baslangic = st.date_input(
+                "Başlangıç Tarihi",
+                value=date.today() - timedelta(days=2),
+                key="dk_baslangic"
+            )
+        with dk_col2:
+            dk_bitis = st.date_input(
+                "Bitiş Tarihi",
+                value=date.today(),
+                key="dk_bitis"
+            )
+
+        if dk_baslangic >= dk_bitis:
+            st.warning("Başlangıç tarihi bitiş tarihinden önce olmalıdır.")
+        else:
+            with st.spinner("Dönemsel karşılaştırma hesaplanıyor..."):
+                dk_df = donemsel_karsilastirma_hesapla(
+                    dk_baslangic.strftime("%Y-%m-%d"),
+                    dk_bitis.strftime("%Y-%m-%d")
+                )
+
+            if dk_df.empty:
+                st.info("Seçilen tarih aralığında veri bulunamadı.")
+            else:
+                # Kategori oluştur (Exposure — Tür)
+                dk_df["Kategori"] = dk_df["Exposure"] + " — " + dk_df["Tür"]
+
+                # Kategori bazında grupla
+                dk_grup = dk_df.groupby("Kategori").agg({
+                    "Başlangıç": "sum",
+                    "Bitiş": "sum"
+                }).reset_index()
+
+                dk_grup["Fark"] = dk_grup["Bitiş"] - dk_grup["Başlangıç"]
+                dk_grup["Fark (%)"] = dk_grup.apply(
+                    lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
+                    if r["Başlangıç"] > 0 else None, axis=1
+                )
+
+                # Sıralama: Fark'a göre büyükten küçüğe
+                dk_grup = dk_grup.sort_values("Fark", ascending=False).reset_index(drop=True)
+
+                # Toplam satırı ekle
+                toplam_bas = dk_grup["Başlangıç"].sum()
+                toplam_bit = dk_grup["Bitiş"].sum()
+                toplam_fark = toplam_bit - toplam_bas
+                toplam_yuzde = round((toplam_fark / toplam_bas) * 100, 1) if toplam_bas > 0 else None
+
+                toplam_satir = pd.DataFrame([{
+                    "Kategori"  : "TOPLAM",
+                    "Başlangıç" : toplam_bas,
+                    "Bitiş"     : toplam_bit,
+                    "Fark"      : toplam_fark,
+                    "Fark (%)"  : toplam_yuzde,
+                }])
+                dk_grup = pd.concat([dk_grup, toplam_satir], ignore_index=True)
+
+                # --- USD versiyonu ---
+                usd_kur_bas = kur_getir("USD", dk_baslangic.strftime("%Y-%m-%d"))
+                usd_kur_bit = kur_getir("USD", dk_bitis.strftime("%Y-%m-%d"))
+
+                dk_usd = dk_grup.copy()
+                dk_usd["Başlangıç"] = dk_usd["Başlangıç"] / usd_kur_bas
+                dk_usd["Bitiş"]     = dk_usd["Bitiş"]     / usd_kur_bit
+                dk_usd["Fark"]      = dk_usd["Bitiş"] - dk_usd["Başlangıç"]
+                dk_usd["Fark (%)"]  = dk_usd.apply(
+                    lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
+                    if r["Başlangıç"] > 0 else None, axis=1
+                )
+
+                # --- Sekmeler: TL ve USD ---
+                dk_tab_tl, dk_tab_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                with dk_tab_tl:
+                    st.dataframe(
+                        dk_grup.style.format({
+                            "Başlangıç" : "{:,.0f}",
+                            "Bitiş"     : "{:,.0f}",
+                            "Fark"      : "{:,.0f}",
+                            "Fark (%)"  : "{:.1f}%",
+                        }, na_rep="—"),
+                        use_container_width=True, hide_index=True
+                    )
+
+                with dk_tab_usd:
+                    st.dataframe(
+                        dk_usd.style.format({
+                            "Başlangıç" : "${:,.0f}",
+                            "Bitiş"     : "${:,.0f}",
+                            "Fark"      : "${:,.0f}",
+                            "Fark (%)"  : "{:.1f}%",
+                        }, na_rep="—"),
+                        use_container_width=True, hide_index=True
+                    )
+
+                # --- Varlık bazında detay ---
+                with st.expander("📋 Varlık Bazında Detay"):
+                    dk_detay = dk_df[["Kod", "Tür", "Exposure", "PB", "Başlangıç", "Bitiş"]].copy()
+                    dk_detay["Fark"]     = dk_detay["Bitiş"] - dk_detay["Başlangıç"]
+                    dk_detay["Fark (%)"] = dk_detay.apply(
+                        lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
+                        if r["Başlangıç"] > 0 else None, axis=1
+                    )
+                    dk_detay = dk_detay.sort_values("Fark", ascending=False)
+
+                    dk_detay_tl, dk_detay_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                    with dk_detay_tl:
+                        st.dataframe(
+                            dk_detay.style.format({
+                                "Başlangıç" : "{:,.0f}",
+                                "Bitiş"     : "{:,.0f}",
+                                "Fark"      : "{:,.0f}",
+                                "Fark (%)"  : "{:.1f}%",
+                            }, na_rep="—"),
+                            use_container_width=True, hide_index=True
+                        )
+
+                    with dk_detay_usd:
+                        dk_detay_usd_df = dk_detay.copy()
+                        dk_detay_usd_df["Başlangıç"] = dk_detay_usd_df["Başlangıç"] / usd_kur_bas
+                        dk_detay_usd_df["Bitiş"]     = dk_detay_usd_df["Bitiş"]     / usd_kur_bit
+                        dk_detay_usd_df["Fark"]      = dk_detay_usd_df["Bitiş"] - dk_detay_usd_df["Başlangıç"]
+                        dk_detay_usd_df["Fark (%)"]  = dk_detay_usd_df.apply(
+                            lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
+                            if r["Başlangıç"] > 0 else None, axis=1
+                        )
+                        st.dataframe(
+                            dk_detay_usd_df.style.format({
+                                "Başlangıç" : "${:,.0f}",
+                                "Bitiş"     : "${:,.0f}",
+                                "Fark"      : "${:,.0f}",
+                                "Fark (%)"  : "{:.1f}%",
+                            }, na_rep="—"),
+                            use_container_width=True, hide_index=True
+                        )
 
     # ==========================================
     # NAKİT AKIŞI GİRİŞ FORMU (sayfanın en altı)
