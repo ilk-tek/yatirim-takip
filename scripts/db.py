@@ -2,24 +2,27 @@
 # VERİTABANI BAĞLANTISI — TURSO (libsql)
 # ==========================================
 # Bu dosya, projenin TEK bağlantı noktasıdır.
-# Diğer tüm dosyalar veritabanına buradan erişir.
 #
 # Çalışma mantığı:
-#   - Streamlit Cloud'da: temp dosya + sync (embedded replica)
-#   - Lokal'de: kalıcı embedded replica (yerel kopya) ile hızlı okuma
+#   - Lokal'de: libsql embedded replica (hızlı okuma)
+#   - Streamlit Cloud'da: Turso HTTP API (requests ile)
 # ==========================================
 
 import os
 import warnings
-import tempfile
+import json
 from pathlib import Path
 
 import pandas as pd
+import requests as _requests
 
 try:
     import libsql_experimental as libsql
 except ImportError:
-    import libsql
+    try:
+        import libsql
+    except ImportError:
+        libsql = None
 
 from dotenv import load_dotenv
 
@@ -34,10 +37,7 @@ def _streamlit_cloud_mi():
 
 
 def _secrets_oku():
-    """
-    TURSO_DATABASE_URL ve TURSO_AUTH_TOKEN değerlerini okur.
-    Önce Streamlit secrets (Cloud), sonra .env (lokal) dener.
-    """
+    """TURSO_DATABASE_URL ve TURSO_AUTH_TOKEN değerlerini okur."""
     turso_url = ""
     turso_token = ""
 
@@ -64,46 +64,217 @@ warnings.filterwarnings(
     message="pandas only supports SQLAlchemy connectable.*"
 )
 
-# Tek paylaşılan bağlantı (singleton)
+# Tek paylaşılan bağlantı (singleton) — sadece lokal için
 _baglanti = None
+
+
+# ==========================================
+# TURSO HTTP API YARDIMCILARI (Streamlit Cloud için)
+# ==========================================
+
+def _turso_http_url():
+    """libsql:// URL'yi https:// HTTP API URL'sine çevirir."""
+    url, _ = _secrets_oku()
+    # libsql://host → https://host
+    return url.replace("libsql://", "https://")
+
+
+def _turso_http_execute(sql, params=None):
+    """
+    Turso HTTP API ile SQL çalıştırır.
+    Dönen: (rows, columns) tuple
+    """
+    url, token = _secrets_oku()
+    http_url = url.replace("libsql://", "https://")
+
+    # Parametreleri Turso API formatına çevir
+    args = []
+    if params:
+        for p in params:
+            if isinstance(p, int):
+                args.append({"type": "integer", "value": str(p)})
+            elif isinstance(p, float):
+                args.append({"type": "float", "value": str(p)})
+            else:
+                args.append({"type": "text", "value": str(p)})
+
+    # SQL'deki ? parametrelerini Turso formatına çevir
+    stmt = {"sql": sql}
+    if args:
+        stmt["args"] = args
+
+    payload = {
+        "requests": [
+            {"type": "execute", "stmt": stmt},
+            {"type": "close"}
+        ]
+    }
+
+    response = _requests.post(
+        f"{http_url}/v2/pipeline",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    # Sonucu parse et
+    result = data["results"][0]["response"]["result"]
+    columns = [col["name"] for col in result["cols"]]
+
+    rows = []
+    for row in result["rows"]:
+        parsed_row = []
+        for cell in row:
+            if cell["type"] == "null":
+                parsed_row.append(None)
+            elif cell["type"] == "integer":
+                parsed_row.append(int(cell["value"]))
+            elif cell["type"] == "float":
+                parsed_row.append(float(cell["value"]))
+            else:
+                parsed_row.append(cell["value"])
+        rows.append(parsed_row)
+
+    return rows, columns
+
+
+def _turso_http_write(sql, params=None):
+    """
+    Turso HTTP API ile yazma işlemi (INSERT/UPDATE/DELETE).
+    """
+    url, token = _secrets_oku()
+    http_url = url.replace("libsql://", "https://")
+
+    args = []
+    if params:
+        for p in params:
+            if isinstance(p, int):
+                args.append({"type": "integer", "value": str(p)})
+            elif isinstance(p, float):
+                args.append({"type": "float", "value": str(p)})
+            else:
+                args.append({"type": "text", "value": str(p)})
+
+    stmt = {"sql": sql}
+    if args:
+        stmt["args"] = args
+
+    payload = {
+        "requests": [
+            {"type": "execute", "stmt": stmt},
+            {"type": "close"}
+        ]
+    }
+
+    response = _requests.post(
+        f"{http_url}/v2/pipeline",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+# ==========================================
+# ANA FONKSİYONLAR
+# ==========================================
+
+class _CloudCursor:
+    """
+    Streamlit Cloud için cursor nesnesi.
+    Turso HTTP API üzerinden çalışır.
+    """
+    def __init__(self):
+        self._rows = []
+        self._columns = []
+        self._pos = 0
+        self.description = None
+
+    def execute(self, sql, params=None):
+        if params:
+            param_list = list(params) if not isinstance(params, list) else params
+        else:
+            param_list = None
+
+        # SELECT mi yazma mı?
+        sql_temiz = sql.strip().upper()
+        if sql_temiz.startswith("SELECT") or sql_temiz.startswith("WITH"):
+            self._rows, self._columns = _turso_http_execute(sql, param_list)
+            self._pos = 0
+            # pandas uyumu için description oluştur
+            self.description = [(col,) for col in self._columns]
+        else:
+            _turso_http_write(sql, param_list)
+            self._rows = []
+            self._columns = []
+            self.description = None
+
+    def fetchone(self):
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
+        return None
+
+    def fetchall(self):
+        remaining = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return remaining
+
+
+class _CloudBaglanti:
+    """
+    Streamlit Cloud için sahte bağlantı nesnesi.
+    Turso HTTP API üzerinden çalışır.
+    """
+    def execute(self, sql, params=None):
+        cur = _CloudCursor()
+        cur.execute(sql, params)
+        return cur
+
+    def cursor(self):
+        return _CloudCursor()
+
+    def commit(self):
+        pass  # HTTP API her sorguyu otomatik commit eder
 
 
 def baglan():
     """
     Turso veritabanına bağlanır ve TEK paylaşılan bağlantıyı döndürür.
-    Her iki ortamda da embedded replica kullanır (Cloud'da temp dosya).
+    - Lokal: libsql embedded replica
+    - Cloud: HTTP API üzerinden sahte bağlantı nesnesi
     """
     global _baglanti
+
+    if _streamlit_cloud_mi():
+        # Cloud: her seferinde yeni CloudBaglanti döndür
+        return _CloudBaglanti()
+
     if _baglanti is None:
         turso_url, turso_token = _secrets_oku()
-
         if not turso_url or not turso_token:
             raise RuntimeError(
                 "TURSO_DATABASE_URL veya TURSO_AUTH_TOKEN bulunamadı.\n"
                 f"Lütfen şu dosyayı doldurun: {PROJE_KOKU / '.env'}"
             )
 
-        if _streamlit_cloud_mi():
-            # Streamlit Cloud: temp dosya ile embedded replica
-            temp_db = os.path.join(tempfile.gettempdir(), "portfoy_replica.db")
-            _baglanti = libsql.connect(
-                temp_db,
-                sync_url=turso_url,
-                auth_token=turso_token,
-            )
-        else:
-            # Lokal: kalıcı dosya ile embedded replica
-            _KLASOR = Path.home() / ".yatirim_takip"
-            _KLASOR.mkdir(parents=True, exist_ok=True)
-            LOKAL_REPLIKA = str(_KLASOR / "portfoy_replica.db")
-            _baglanti = libsql.connect(
-                LOKAL_REPLIKA,
-                sync_url=turso_url,
-                auth_token=turso_token,
-            )
-
-        # İlk bağlantıda buluttan veri çek
-        _baglanti.sync()
+        _KLASOR = Path.home() / ".yatirim_takip"
+        _KLASOR.mkdir(parents=True, exist_ok=True)
+        LOKAL_REPLIKA = str(_KLASOR / "portfoy_replica.db")
+        _baglanti = libsql.connect(
+            LOKAL_REPLIKA,
+            sync_url=turso_url,
+            auth_token=turso_token,
+        )
 
     return _baglanti
 
@@ -111,33 +282,25 @@ def baglan():
 def sql_oku(sql, baglanti, params=None):
     """
     pd.read_sql() yerine kullan.
-    libsql_experimental bağlantısıyla pandas uyumsuzluğunu çözer.
-    Hem Streamlit Cloud'da hem lokalde çalışır.
+    Lokal'de pd.read_sql, Cloud'da HTTP API kullanır.
     """
-    try:
-        # Önce normal pd.read_sql dene (lokalde çalışır)
-        return pd.read_sql(sql, baglanti, params=params)
-    except Exception:
-        # Çalışmazsa manuel çek (Streamlit Cloud)
-        if params:
-            cursor = baglanti.execute(sql, list(params))
-        else:
-            cursor = baglanti.execute(sql)
-        rows = cursor.fetchall()
-        if not rows:
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            return pd.DataFrame(columns=columns)
-        columns = [desc[0] for desc in cursor.description]
+    if _streamlit_cloud_mi():
+        # Cloud: HTTP API ile çalıştır
+        rows, columns = _turso_http_execute(sql, list(params) if params else None)
         return pd.DataFrame(rows, columns=columns)
+    else:
+        # Lokal: normal pd.read_sql
+        return pd.read_sql(sql, baglanti, params=params)
 
 
 def senkronize_et():
     """
     Bulut ile yerel kopya arasında senkronizasyon yapar.
-    Hata olursa uygulamayı çökertmez, sadece uyarı yazar.
+    Streamlit Cloud'da bu işlem atlanır (zaten doğrudan buluta bağlı).
     """
     try:
-        baglan().sync()
+        if not _streamlit_cloud_mi():
+            baglan().sync()
         return True
     except Exception as e:
         print(f"Senkronizasyon uyarısı: {e}")
