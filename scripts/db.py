@@ -87,6 +87,9 @@ def _turso_http_execute(sql, params=None):
     url, token = _secrets_oku()
     http_url = url.replace("libsql://", "https://")
 
+    # SQL'i temizle (fazla boşluk ve satır sonları)
+    sql = " ".join(sql.split())
+
     # Parametreleri Turso API formatına çevir
     args = []
     if params:
@@ -98,12 +101,12 @@ def _turso_http_execute(sql, params=None):
             else:
                 args.append({"type": "text", "value": str(p)})
 
-    # SQL'deki ? parametrelerini Turso formatına çevir
     stmt = {"sql": sql}
     if args:
         stmt["args"] = args
 
     payload = {
+        "baton": None,
         "requests": [
             {"type": "execute", "stmt": stmt},
             {"type": "close"}
@@ -119,7 +122,14 @@ def _turso_http_execute(sql, params=None):
         json=payload,
         timeout=30,
     )
-    response.raise_for_status()
+
+    if not response.ok:
+        # Hata detayını göster (logda görünür)
+        raise RuntimeError(
+            f"Turso HTTP API hatası {response.status_code}: {response.text}\n"
+            f"SQL: {sql[:200]}"
+        )
+
     data = response.json()
 
     # Sonucu parse et
@@ -145,10 +155,13 @@ def _turso_http_execute(sql, params=None):
 
 def _turso_http_write(sql, params=None):
     """
-    Turso HTTP API ile yazma işlemi (INSERT/UPDATE/DELETE).
+    Turso HTTP API ile yazma işlemi (INSERT/UPDATE/DELETE/CREATE).
     """
     url, token = _secrets_oku()
     http_url = url.replace("libsql://", "https://")
+
+    # SQL'i temizle
+    sql = " ".join(sql.split())
 
     args = []
     if params:
@@ -165,6 +178,7 @@ def _turso_http_write(sql, params=None):
         stmt["args"] = args
 
     payload = {
+        "baton": None,
         "requests": [
             {"type": "execute", "stmt": stmt},
             {"type": "close"}
@@ -180,7 +194,12 @@ def _turso_http_write(sql, params=None):
         json=payload,
         timeout=30,
     )
-    response.raise_for_status()
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Turso HTTP API yazma hatası {response.status_code}: {response.text}\n"
+            f"SQL: {sql[:200]}"
+        )
 
 
 # ==========================================
