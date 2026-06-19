@@ -16,7 +16,6 @@ from hesaplamalar import (
     performans_ozeti, twr_hesapla, yilliklandir,
     mevduat_deger_hesapla, aylik_portfoy_ozeti,
     aylik_dagilim_hesapla, AY_ISIMLERI,
-    donemsel_karsilastirma_hesapla,
     fifo_maliyet_hesapla, MEVDUAT_TURLERI,
     kur_getir, bugunun_kuru
 )
@@ -136,6 +135,7 @@ if ADMIN_MOD:
         "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
+        "🏛️ Yatırım Fonları",
         "💱 Fiyat Güncelle",
         "➕ Varlık Ekle",
         "✏️ Varlık Düzenle",
@@ -150,6 +150,7 @@ else:
         "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
+        "🏛️ Yatırım Fonları",
         "📋 İşlem Geçmişi",
     ]
 
@@ -1091,152 +1092,6 @@ elif sayfa == "📅 Aylık Özet":
                         use_container_width=True
                     )
 
-        # ==========================================
-        # DÖNEMSEL KARŞILAŞTIRMA
-        # ==========================================
-        st.markdown("---")
-        st.subheader("🔄 Dönemsel Karşılaştırma")
-        st.caption("İki tarih arasındaki varlık değer değişimini kategori bazında gösterir.")
-
-        dk_col1, dk_col2 = st.columns(2)
-        with dk_col1:
-            dk_baslangic = st.date_input(
-                "Başlangıç Tarihi",
-                value=date.today() - timedelta(days=2),
-                key="dk_baslangic"
-            )
-        with dk_col2:
-            dk_bitis = st.date_input(
-                "Bitiş Tarihi",
-                value=date.today(),
-                key="dk_bitis"
-            )
-
-        if dk_baslangic >= dk_bitis:
-            st.warning("Başlangıç tarihi bitiş tarihinden önce olmalıdır.")
-        else:
-            with st.spinner("Dönemsel karşılaştırma hesaplanıyor..."):
-                dk_df = donemsel_karsilastirma_hesapla(
-                    dk_baslangic.strftime("%Y-%m-%d"),
-                    dk_bitis.strftime("%Y-%m-%d")
-                )
-
-            if dk_df.empty:
-                st.info("Seçilen tarih aralığında veri bulunamadı.")
-            else:
-                # Kategori oluştur (Exposure — Tür)
-                dk_df["Kategori"] = dk_df["Exposure"] + " — " + dk_df["Tür"]
-
-                # Kategori bazında grupla
-                dk_grup = dk_df.groupby("Kategori").agg({
-                    "Başlangıç": "sum",
-                    "Bitiş": "sum"
-                }).reset_index()
-
-                dk_grup["Fark"] = dk_grup["Bitiş"] - dk_grup["Başlangıç"]
-                dk_grup["Fark (%)"] = dk_grup.apply(
-                    lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
-                    if r["Başlangıç"] > 0 else None, axis=1
-                )
-
-                # Sıralama: Fark'a göre büyükten küçüğe
-                dk_grup = dk_grup.sort_values("Fark", ascending=False).reset_index(drop=True)
-
-                # Toplam satırı ekle
-                toplam_bas = dk_grup["Başlangıç"].sum()
-                toplam_bit = dk_grup["Bitiş"].sum()
-                toplam_fark = toplam_bit - toplam_bas
-                toplam_yuzde = round((toplam_fark / toplam_bas) * 100, 1) if toplam_bas > 0 else None
-
-                toplam_satir = pd.DataFrame([{
-                    "Kategori"  : "TOPLAM",
-                    "Başlangıç" : toplam_bas,
-                    "Bitiş"     : toplam_bit,
-                    "Fark"      : toplam_fark,
-                    "Fark (%)"  : toplam_yuzde,
-                }])
-                dk_grup = pd.concat([dk_grup, toplam_satir], ignore_index=True)
-
-                # --- USD versiyonu ---
-                usd_kur_bas = kur_getir("USD", dk_baslangic.strftime("%Y-%m-%d"))
-                usd_kur_bit = kur_getir("USD", dk_bitis.strftime("%Y-%m-%d"))
-
-                dk_usd = dk_grup.copy()
-                dk_usd["Başlangıç"] = dk_usd["Başlangıç"] / usd_kur_bas
-                dk_usd["Bitiş"]     = dk_usd["Bitiş"]     / usd_kur_bit
-                dk_usd["Fark"]      = dk_usd["Bitiş"] - dk_usd["Başlangıç"]
-                dk_usd["Fark (%)"]  = dk_usd.apply(
-                    lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
-                    if r["Başlangıç"] > 0 else None, axis=1
-                )
-
-                # --- Sekmeler: TL ve USD ---
-                dk_tab_tl, dk_tab_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
-
-                with dk_tab_tl:
-                    st.dataframe(
-                        dk_grup.style.format({
-                            "Başlangıç" : "{:,.0f}",
-                            "Bitiş"     : "{:,.0f}",
-                            "Fark"      : "{:,.0f}",
-                            "Fark (%)"  : "{:.1f}%",
-                        }, na_rep="—"),
-                        use_container_width=True, hide_index=True
-                    )
-
-                with dk_tab_usd:
-                    st.dataframe(
-                        dk_usd.style.format({
-                            "Başlangıç" : "${:,.0f}",
-                            "Bitiş"     : "${:,.0f}",
-                            "Fark"      : "${:,.0f}",
-                            "Fark (%)"  : "{:.1f}%",
-                        }, na_rep="—"),
-                        use_container_width=True, hide_index=True
-                    )
-
-                # --- Varlık bazında detay ---
-                with st.expander("📋 Varlık Bazında Detay"):
-                    dk_detay = dk_df[["Kod", "Tür", "Exposure", "PB", "Başlangıç", "Bitiş"]].copy()
-                    dk_detay["Fark"]     = dk_detay["Bitiş"] - dk_detay["Başlangıç"]
-                    dk_detay["Fark (%)"] = dk_detay.apply(
-                        lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
-                        if r["Başlangıç"] > 0 else None, axis=1
-                    )
-                    dk_detay = dk_detay.sort_values("Fark", ascending=False)
-
-                    dk_detay_tl, dk_detay_usd = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
-
-                    with dk_detay_tl:
-                        st.dataframe(
-                            dk_detay.style.format({
-                                "Başlangıç" : "{:,.0f}",
-                                "Bitiş"     : "{:,.0f}",
-                                "Fark"      : "{:,.0f}",
-                                "Fark (%)"  : "{:.1f}%",
-                            }, na_rep="—"),
-                            use_container_width=True, hide_index=True
-                        )
-
-                    with dk_detay_usd:
-                        dk_detay_usd_df = dk_detay.copy()
-                        dk_detay_usd_df["Başlangıç"] = dk_detay_usd_df["Başlangıç"] / usd_kur_bas
-                        dk_detay_usd_df["Bitiş"]     = dk_detay_usd_df["Bitiş"]     / usd_kur_bit
-                        dk_detay_usd_df["Fark"]      = dk_detay_usd_df["Bitiş"] - dk_detay_usd_df["Başlangıç"]
-                        dk_detay_usd_df["Fark (%)"]  = dk_detay_usd_df.apply(
-                            lambda r: round((r["Fark"] / r["Başlangıç"]) * 100, 1)
-                            if r["Başlangıç"] > 0 else None, axis=1
-                        )
-                        st.dataframe(
-                            dk_detay_usd_df.style.format({
-                                "Başlangıç" : "${:,.0f}",
-                                "Bitiş"     : "${:,.0f}",
-                                "Fark"      : "${:,.0f}",
-                                "Fark (%)"  : "{:.1f}%",
-                            }, na_rep="—"),
-                            use_container_width=True, hide_index=True
-                        )
-
     # ==========================================
     # NAKİT AKIŞI GİRİŞ FORMU (sayfanın en altı)
     # ==========================================
@@ -1298,6 +1153,423 @@ elif sayfa == "📅 Aylık Özet":
                 import time
                 time.sleep(1)
                 st.rerun()
+
+# ==========================================
+# SAYFA: YATIRIM FONLARI
+# ==========================================
+elif sayfa == "🏛️ Yatırım Fonları":
+    st.title("🏛️ Yatırım Fonları")
+    st.markdown("---")
+
+    # ==========================================
+    # VERİ HAZIRLAMA
+    # ==========================================
+    baglanti = veritabani_baglan()
+
+    # Bugünkü kurlar
+    usd_kuru_bugun = bugunun_kuru("USD")
+
+    # Kurları kenar çubuğunda göster
+    eur_kuru_bugun = bugunun_kuru("EUR")
+    gbp_kuru_bugun = bugunun_kuru("GBP")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**💱 Güncel Kurlar**")
+    st.sidebar.markdown(f"USD/TRY: **{usd_kuru_bugun:.4f}**")
+    st.sidebar.markdown(f"EUR/TRY: **{eur_kuru_bugun:.4f}**")
+    st.sidebar.markdown(f"GBP/TRY: **{gbp_kuru_bugun:.4f}**")
+
+    # Sadece Yatırım Fonu ve BES Fonu türlerini çek
+    FON_TURLERI = ("Yatırım Fonu", "BES Fonu")
+
+    fon_varliklar = sql_oku("""
+        SELECT id, kod, ad, tur, para_birimi, exposure
+        FROM varliklar
+        WHERE tur IN ('Yatırım Fonu', 'BES Fonu')
+    """, baglanti)
+
+    if fon_varliklar.empty:
+        st.info("Portföyde yatırım fonu veya BES fonu bulunmuyor.")
+    else:
+        # Net adet hesapla (pozisyonu olan fonlar)
+        baglanti2 = veritabani_baglan()
+        net_adetler = sql_oku("""
+            SELECT varlik_id,
+                   SUM(CASE WHEN islem_turu = 'Alış' THEN adet ELSE -adet END) AS net_adet
+            FROM islemler
+            WHERE islem_turu IN ('Alış', 'Satış')
+              AND varlik_id IN (SELECT id FROM varliklar WHERE tur IN ('Yatırım Fonu', 'BES Fonu'))
+            GROUP BY varlik_id
+            HAVING net_adet > 0
+        """, baglanti2)
+
+        if net_adetler.empty:
+            st.info("Aktif fon pozisyonu bulunmuyor.")
+        else:
+            # Son fiyatları çek (MAX(tarih) pattern — MAX(id) kullanma!)
+            baglanti3 = veritabani_baglan()
+            son_fiyatlar_fon = sql_oku("""
+                SELECT f1.varlik_id, f1.fiyat, f1.tarih AS son_fiyat_tarihi
+                FROM fiyat_gecmisi f1
+                INNER JOIN (
+                    SELECT varlik_id, MAX(tarih) AS son_tarih
+                    FROM fiyat_gecmisi
+                    GROUP BY varlik_id
+                ) f2 ON f1.varlik_id = f2.varlik_id AND f1.tarih = f2.son_tarih
+            """, baglanti3)
+
+            # Portföy etiketi: her fon için en büyük pozisyona sahip etiketi bul
+            baglanti4 = veritabani_baglan()
+            etiket_bilgi = sql_oku("""
+                SELECT varlik_id,
+                       COALESCE(portfoy_etiketi, '') AS portfoy_etiketi,
+                       SUM(CASE WHEN islem_turu = 'Alış' THEN adet ELSE -adet END) AS net
+                FROM islemler
+                WHERE islem_turu IN ('Alış', 'Satış')
+                  AND varlik_id IN (SELECT id FROM varliklar WHERE tur IN ('Yatırım Fonu', 'BES Fonu'))
+                GROUP BY varlik_id, portfoy_etiketi
+                HAVING net > 0
+            """, baglanti4)
+
+            # Varlık → portföy etiketi eşlemesi (en büyük pozisyon)
+            varlik_etiket = {}
+            if not etiket_bilgi.empty:
+                for vid in etiket_bilgi["varlik_id"].unique():
+                    vid_df = etiket_bilgi[etiket_bilgi["varlik_id"] == vid]
+                    en_buyuk = vid_df.loc[vid_df["net"].idxmax()]
+                    et = en_buyuk["portfoy_etiketi"]
+                    varlik_etiket[vid] = et if et else "Belirtilmemiş"
+
+            # Fon özet tablosu oluştur
+            from datetime import datetime as _dt_fon
+            bugun_fon = date.today()
+
+            fon_ozet = []
+            for _, fon in fon_varliklar.iterrows():
+                # Net adet
+                adet_row = net_adetler[net_adetler["varlik_id"] == fon["id"]]
+                if adet_row.empty:
+                    continue
+                net_adet = float(adet_row["net_adet"].values[0])
+
+                # Son fiyat
+                fiyat_row = son_fiyatlar_fon[son_fiyatlar_fon["varlik_id"] == fon["id"]]
+                if fiyat_row.empty:
+                    continue
+                son_fiyat = float(fiyat_row["fiyat"].values[0])
+                son_fiyat_tarihi = fiyat_row["son_fiyat_tarihi"].values[0]
+
+                # Kur
+                pb = fon["para_birimi"] if fon["para_birimi"] else "TRY"
+                kur = bugunun_kuru(pb)
+
+                # Güncel değer
+                deger_tl = net_adet * son_fiyat * kur
+                deger_usd = deger_tl / usd_kuru_bugun
+
+                # Fiyat güncelliği (kaç gün eski)
+                try:
+                    son_tarih_dt = _dt_fon.strptime(son_fiyat_tarihi, "%Y-%m-%d").date()
+                    gun_farki = (bugun_fon - son_tarih_dt).days
+                except Exception:
+                    gun_farki = 999
+
+                fon_ozet.append({
+                    "varlik_id"        : fon["id"],
+                    "Kod"              : fon["kod"],
+                    "Ad"               : fon["ad"],
+                    "Tür"              : fon["tur"],
+                    "Exposure"         : fon["exposure"] if fon["exposure"] else "—",
+                    "Portföy Etiketi"  : varlik_etiket.get(fon["id"], "Belirtilmemiş"),
+                    "Adet"             : net_adet,
+                    "Birim Fiyat"      : son_fiyat,
+                    "Değer (TL)"       : deger_tl,
+                    "Değer (USD)"      : deger_usd,
+                    "Son Fiyat Tarihi" : son_fiyat_tarihi,
+                    "Güncelleme"       : gun_farki,
+                })
+
+            if not fon_ozet:
+                st.info("Fiyat verisi olan aktif fon pozisyonu bulunmuyor.")
+            else:
+                fon_df = pd.DataFrame(fon_ozet)
+                toplam_fon_tl  = fon_df["Değer (TL)"].sum()
+                toplam_fon_usd = fon_df["Değer (USD)"].sum()
+                fon_sayisi     = len(fon_df)
+
+                # ==========================================
+                # 1) METRİK KARTLARI
+                # ==========================================
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("💰 Toplam Fon Değeri (TL)", f"{toplam_fon_tl:,.0f} TL")
+                mc2.metric("💵 Toplam Fon Değeri (USD)", f"${toplam_fon_usd:,.0f}")
+                mc3.metric("📊 Fon Sayısı", f"{fon_sayisi}")
+
+                # ==========================================
+                # 2) SON FİYAT TARİHİ UYARISI
+                # ==========================================
+                eski_fonlar = fon_df[fon_df["Güncelleme"] > 7]
+                if not eski_fonlar.empty:
+                    uyari_mesajlari = []
+                    for _, ef in eski_fonlar.iterrows():
+                        seviye = "🔴" if ef["Güncelleme"] > 30 else "🟡"
+                        uyari_mesajlari.append(
+                            f"{seviye} **{ef['Kod']}** — son fiyat: {ef['Son Fiyat Tarihi']} ({ef['Güncelleme']} gün eski)"
+                        )
+                    st.warning("⚠️ Fiyatı güncel olmayan fonlar:\n\n" + "\n\n".join(uyari_mesajlari))
+
+                st.markdown("---")
+
+                # ==========================================
+                # 3) EXPOSURE BAZINDA TABLO (TL / USD sekmeli)
+                # ==========================================
+                st.subheader("Exposure Bazında Fon Dağılımı")
+
+                tl_tab, usd_tab = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                for sekme, deger_sutun, birim, toplam_deger in [
+                    (tl_tab,  "Değer (TL)",  "TL",  toplam_fon_tl),
+                    (usd_tab, "Değer (USD)", "USD", toplam_fon_usd),
+                ]:
+                    with sekme:
+                        # --- Exposure bazında özet tablo ---
+                        exp_grup = fon_df.groupby("Exposure").agg(
+                            Bakiye=(deger_sutun, "sum"),
+                            Fon_Sayisi=("Kod", "count"),
+                        ).reset_index()
+
+                        exp_grup["Pay %"] = (exp_grup["Bakiye"] / toplam_deger * 100).round(1)
+
+                        # Toplam satırı ekle
+                        toplam_satir = pd.DataFrame([{
+                            "Exposure"  : "TOPLAM",
+                            "Bakiye"    : toplam_deger,
+                            "Fon_Sayisi": fon_sayisi,
+                            "Pay %"     : 100.0,
+                        }])
+                        exp_tablo = pd.concat([exp_grup, toplam_satir], ignore_index=True)
+
+                        if birim == "TL":
+                            st.dataframe(
+                                exp_tablo.rename(columns={
+                                    "Bakiye": "Güncel Bakiye",
+                                    "Fon_Sayisi": "Fon Sayısı",
+                                }).style.format({
+                                    "Güncel Bakiye": "{:,.0f} TL",
+                                    "Pay %": "%{:.1f}",
+                                }),
+                                use_container_width=True, hide_index=True
+                            )
+                        else:
+                            st.dataframe(
+                                exp_tablo.rename(columns={
+                                    "Bakiye": "Güncel Bakiye",
+                                    "Fon_Sayisi": "Fon Sayısı",
+                                }).style.format({
+                                    "Güncel Bakiye": "${:,.0f}",
+                                    "Pay %": "%{:.1f}",
+                                }),
+                                use_container_width=True, hide_index=True
+                            )
+
+                        # --- Exposure expand → Portföy Etiketi → Fon listesi ---
+                        st.markdown("##### Detay Kırılımı")
+
+                        exposurelar_fon = sorted(fon_df["Exposure"].unique())
+
+                        for exp in exposurelar_fon:
+                            exp_fonlar = fon_df[fon_df["Exposure"] == exp]
+                            exp_toplam = exp_fonlar[deger_sutun].sum()
+                            exp_pay    = (exp_toplam / toplam_deger * 100) if toplam_deger else 0
+
+                            if birim == "TL":
+                                exp_baslik = f"📂 {exp}  —  {exp_toplam:,.0f} TL  |  Pay: %{exp_pay:.1f}"
+                            else:
+                                exp_baslik = f"📂 {exp}  —  ${exp_toplam:,.0f}  |  Pay: %{exp_pay:.1f}"
+
+                            with st.expander(exp_baslik):
+                                # Portföy etiketi bazında alt kırılım
+                                etiketler = sorted(exp_fonlar["Portföy Etiketi"].unique())
+
+                                for etiket in etiketler:
+                                    et_fonlar = exp_fonlar[exp_fonlar["Portföy Etiketi"] == etiket]
+                                    et_toplam = et_fonlar[deger_sutun].sum()
+                                    et_pay    = (et_toplam / toplam_deger * 100) if toplam_deger else 0
+
+                                    if birim == "TL":
+                                        et_baslik = f"🏷️ {etiket}  —  {et_toplam:,.0f} TL  |  Pay: %{et_pay:.1f}"
+                                    else:
+                                        et_baslik = f"🏷️ {etiket}  —  ${et_toplam:,.0f}  |  Pay: %{et_pay:.1f}"
+
+                                    with st.expander(et_baslik):
+                                        # Fon detay tablosu
+                                        def renk_fon(row):
+                                            if row["Güncelleme"] > 30:
+                                                return ["background-color: #FFE0E0"] * len(row)
+                                            elif row["Güncelleme"] > 7:
+                                                return ["background-color: #FFF9C4"] * len(row)
+                                            return [""] * len(row)
+
+                                        goster_kolonlar = ["Kod", "Ad", "Adet", "Birim Fiyat",
+                                                           deger_sutun, "Son Fiyat Tarihi", "Güncelleme"]
+                                        goster_df = et_fonlar[goster_kolonlar].copy()
+                                        goster_df = goster_df.sort_values(deger_sutun, ascending=False)
+
+                                        # Pay % ekle (toplam fon portföyü içindeki)
+                                        goster_df["Pay %"] = (goster_df[deger_sutun] / toplam_deger * 100).round(1)
+
+                                        if birim == "TL":
+                                            fmt = {
+                                                "Adet"             : "{:,.4f}",
+                                                "Birim Fiyat"      : "{:,.6f}",
+                                                "Değer (TL)"       : "{:,.0f}",
+                                                "Pay %"            : "%{:.1f}",
+                                            }
+                                        else:
+                                            fmt = {
+                                                "Adet"             : "{:,.4f}",
+                                                "Birim Fiyat"      : "{:,.6f}",
+                                                "Değer (USD)"      : "${:,.0f}",
+                                                "Pay %"            : "%{:.1f}",
+                                            }
+
+                                        st.dataframe(
+                                            goster_df.style
+                                                .apply(renk_fon, axis=1)
+                                                .format(fmt),
+                                            use_container_width=True, hide_index=True
+                                        )
+
+                # ==========================================
+                # 4) PORTFÖY ETİKETİ BAZINDA PIE CHART
+                # ==========================================
+                st.markdown("---")
+                st.subheader("Portföy Etiketi Bazında Dağılım")
+
+                import plotly.express as px
+
+                pie_tl_tab, pie_usd_tab = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                for pie_sekme, deger_kol, birim_adi in [
+                    (pie_tl_tab,  "Değer (TL)",  "TL"),
+                    (pie_usd_tab, "Değer (USD)", "USD"),
+                ]:
+                    with pie_sekme:
+                        pie_data = fon_df.groupby("Portföy Etiketi").agg(
+                            Toplam=(deger_kol, "sum")
+                        ).reset_index()
+                        pie_data = pie_data.sort_values("Toplam", ascending=False)
+
+                        if birim_adi == "TL":
+                            pie_data["Etiket"] = pie_data.apply(
+                                lambda r: f"{r['Portföy Etiketi']}: {r['Toplam']:,.0f} TL", axis=1
+                            )
+                        else:
+                            pie_data["Etiket"] = pie_data.apply(
+                                lambda r: f"{r['Portföy Etiketi']}: ${r['Toplam']:,.0f}", axis=1
+                            )
+
+                        fig = px.pie(
+                            pie_data,
+                            values="Toplam",
+                            names="Portföy Etiketi",
+                            title=f"Fon Portföyü — Portföy Etiketi Dağılımı ({birim_adi})",
+                            hover_data={"Etiket": True, "Toplam": False, "Portföy Etiketi": False},
+                        )
+                        fig.update_traces(
+                            textposition="inside",
+                            textinfo="label+percent",
+                            hovertemplate="<b>%{label}</b><br>Tutar: %{customdata[0]}<extra></extra>",
+                            customdata=pie_data[["Etiket"]].values,
+                        )
+                        fig.update_layout(
+                            showlegend=True,
+                            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+                            height=500,
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # ==========================================
+                # 5) FON PERFORMANS ÖZETİ (TWR)
+                # ==========================================
+                st.markdown("---")
+                st.subheader("Fon Performans Özeti")
+
+                donem_fon = st.selectbox("Dönem seçin:", [
+                    "bu_ay", "son_3_ay", "son_6_ay", "bu_yil", "tum_zamanlar"
+                ], format_func=lambda x: {
+                    "bu_ay"        : "Bu Ay",
+                    "son_3_ay"     : "Son 3 Ay",
+                    "son_6_ay"     : "Son 6 Ay",
+                    "bu_yil"       : "Bu Yıl (YTD)",
+                    "tum_zamanlar" : "Tüm Zamanlar"
+                }[x], key="fon_donem")
+
+                # Dönem tarihlerini hesapla
+                bugun_perf = date.today()
+                if donem_fon == "bu_ay":
+                    bas_tarih = bugun_perf.replace(day=1).strftime("%Y-%m-%d")
+                elif donem_fon == "son_3_ay":
+                    from dateutil.relativedelta import relativedelta as _rd_fon
+                    bas_tarih = (bugun_perf - _rd_fon(months=3)).strftime("%Y-%m-%d")
+                elif donem_fon == "son_6_ay":
+                    from dateutil.relativedelta import relativedelta as _rd_fon
+                    bas_tarih = (bugun_perf - _rd_fon(months=6)).strftime("%Y-%m-%d")
+                elif donem_fon == "bu_yil":
+                    bas_tarih = bugun_perf.replace(month=1, day=1).strftime("%Y-%m-%d")
+                else:
+                    bas_tarih = "2000-01-01"
+                bit_tarih = bugun_perf.strftime("%Y-%m-%d")
+
+                # Her fon için TWR hesapla
+                perf_sonuclar = []
+                for _, fon_row in fon_df.iterrows():
+                    sonuc = twr_hesapla(fon_row["varlik_id"], bas_tarih, bit_tarih)
+                    if sonuc is not None:
+                        from datetime import datetime as _dt_perf
+                        bas_dt = _dt_perf.strptime(sonuc["ilk_tarih"], "%Y-%m-%d")
+                        bit_dt = _dt_perf.strptime(sonuc["son_tarih"], "%Y-%m-%d")
+                        gun_sayisi = (bit_dt - bas_dt).days
+
+                        yillik_tl = yilliklandir(sonuc["twr_tl"], gun_sayisi) if gun_sayisi > 0 else None
+
+                        perf_sonuclar.append({
+                            "Kod"           : fon_row["Kod"],
+                            "Ad"            : fon_row["Ad"],
+                            "Exposure"      : fon_row["Exposure"],
+                            "Portföy Etiketi": fon_row["Portföy Etiketi"],
+                            "TWR % (TL)"    : f"{sonuc['twr_tl']:.2f}%",
+                            "Yıllık (TL)"   : f"{yillik_tl:.2f}%" if yillik_tl is not None else "—",
+                            "Son Fiyat"     : fon_row["Son Fiyat Tarihi"],
+                            "Güncelleme"    : fon_row["Güncelleme"],
+                            "TWR_sayi"      : sonuc["twr_tl"],
+                        })
+
+                if perf_sonuclar:
+                    perf_df = pd.DataFrame(perf_sonuclar)
+
+                    # Ortalama TWR metrikleri
+                    ort_twr = perf_df["TWR_sayi"].mean()
+                    st.metric("📊 Fonlar Ort. TWR (TL)", f"{ort_twr:.2f}%")
+
+                    # Renklendirme fonksiyonu
+                    def renk_perf(row):
+                        if row["Güncelleme"] > 30:
+                            return ["background-color: #FFE0E0"] * len(row)
+                        elif row["Güncelleme"] > 7:
+                            return ["background-color: #FFF9C4"] * len(row)
+                        return [""] * len(row)
+
+                    goster_perf = perf_df[["Kod", "Ad", "Exposure", "Portföy Etiketi",
+                                           "TWR % (TL)", "Yıllık (TL)",
+                                           "Son Fiyat", "Güncelleme"]].copy()
+                    goster_perf = goster_perf.sort_values("TWR % (TL)", ascending=False)
+
+                    st.dataframe(
+                        goster_perf.style.apply(renk_perf, axis=1),
+                        use_container_width=True, hide_index=True
+                    )
+                else:
+                    st.info("Seçilen dönem için yeterli fiyat verisi yok. (En az 2 fiyat kaydı gerekli.)")
 
 # ==========================================
 # SAYFA 4: VARLIK EKLE
