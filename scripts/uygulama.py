@@ -17,7 +17,8 @@ from hesaplamalar import (
     mevduat_deger_hesapla, aylik_portfoy_ozeti,
     aylik_dagilim_hesapla, AY_ISIMLERI,
     fifo_maliyet_hesapla, MEVDUAT_TURLERI,
-    kur_getir, bugunun_kuru
+    kur_getir, bugunun_kuru,
+    donemsel_karsilastirma_hesapla
 )
 from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
@@ -135,12 +136,14 @@ if ADMIN_MOD:
         "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
+        "🔄 Dönemsel Karşılaştırma",
         "🏛️ Yatırım Fonları",
         "💱 Fiyat Güncelle",
         "➕ Varlık Ekle",
         "✏️ Varlık Düzenle",
         "💰 İşlem Ekle",
         "✏️ İşlem Düzenle",
+        "📤 İşlem Yükle",
         "📋 İşlem Geçmişi",
         "🗓️ Fiyat Geçmişi",
     ]
@@ -150,6 +153,7 @@ else:
         "🏦 Aracı Kurum",
         "📈 Performans",
         "📅 Aylık Özet",
+        "🔄 Dönemsel Karşılaştırma",
         "🏛️ Yatırım Fonları",
         "📋 İşlem Geçmişi",
     ]
@@ -233,7 +237,7 @@ if sayfa == "📊 Portföy":
         if not eksik_fiyat.empty:
             uyarilar = []
             for _, r in eksik_fiyat.iterrows():
-                if r["ilk_fiyat"] is None:
+                if r["ilk_fiyat"] is None or pd.isna(r["ilk_fiyat"]):
                     uyarilar.append(f"**{r['kod']}** ({r['tur']}) — ilk işlem: {r['ilk_islem']}, fiyat verisi yok")
                 else:
                     from datetime import datetime as _dt
@@ -1155,6 +1159,179 @@ elif sayfa == "📅 Aylık Özet":
                 st.rerun()
 
 # ==========================================
+# SAYFA: DÖNEMSEL KARŞILAŞTIRMA
+# ==========================================
+elif sayfa == "🔄 Dönemsel Karşılaştırma":
+    st.title("🔄 Dönemsel Karşılaştırma")
+    st.caption("İki tarih arasındaki portföy değeri değişimini kategori bazında karşılaştırır.")
+    st.markdown("---")
+
+    # --- Tarih seçiciler ---
+    dk_col1, dk_col2 = st.columns(2)
+    with dk_col1:
+        dk_baslangic = st.date_input(
+            "Başlangıç Tarihi",
+            value=date.today().replace(day=1) - timedelta(days=1),  # geçen ay sonu
+            key="dk_baslangic"
+        )
+    with dk_col2:
+        dk_bitis = st.date_input(
+            "Bitiş Tarihi",
+            value=date.today(),
+            key="dk_bitis"
+        )
+
+    if dk_baslangic >= dk_bitis:
+        st.warning("Başlangıç tarihi, bitiş tarihinden önce olmalıdır.")
+    else:
+        bas_str = str(dk_baslangic)
+        bit_str = str(dk_bitis)
+
+        with st.spinner("Hesaplanıyor..."):
+            dk_df = donemsel_karsilastirma_hesapla(bas_str, bit_str)
+
+        if dk_df.empty:
+            st.info("Seçilen tarihler için veri bulunamadı.")
+        else:
+            # --- "Exposure — Tür" kategorisi oluştur ---
+            dk_df["Kategori"] = dk_df["Exposure"] + " — " + dk_df["Tür"]
+
+            # --- Fark ve Fark % hesapla ---
+            dk_df["Fark"] = dk_df["Bitiş"] - dk_df["Başlangıç"]
+            dk_df["Fark %"] = dk_df.apply(
+                lambda r: (r["Fark"] / r["Başlangıç"] * 100) if r["Başlangıç"] > 0 else None,
+                axis=1
+            )
+
+            # --- Kategori bazında grupla ---
+            dk_grup = dk_df.groupby("Kategori").agg(
+                Başlangıç=("Başlangıç", "sum"),
+                Bitiş=("Bitiş", "sum"),
+            ).reset_index()
+            dk_grup["Fark"] = dk_grup["Bitiş"] - dk_grup["Başlangıç"]
+            dk_grup["Fark %"] = dk_grup.apply(
+                lambda r: (r["Fark"] / r["Başlangıç"] * 100) if r["Başlangıç"] > 0 else None,
+                axis=1
+            )
+
+            # --- TOPLAM satırı ---
+            toplam_bas = dk_grup["Başlangıç"].sum()
+            toplam_bit = dk_grup["Bitiş"].sum()
+            toplam_fark = toplam_bit - toplam_bas
+            toplam_fark_pct = (toplam_fark / toplam_bas * 100) if toplam_bas > 0 else None
+
+            toplam_satir = pd.DataFrame([{
+                "Kategori": "TOPLAM",
+                "Başlangıç": toplam_bas,
+                "Bitiş": toplam_bit,
+                "Fark": toplam_fark,
+                "Fark %": toplam_fark_pct,
+            }])
+            dk_grup = pd.concat([dk_grup, toplam_satir], ignore_index=True)
+
+            # --- Sütun başlıklarını tarihle göster ---
+            bas_etiket = dk_baslangic.strftime("%d.%m.%Y")
+            bit_etiket = dk_bitis.strftime("%d.%m.%Y")
+            dk_grup = dk_grup.rename(columns={
+                "Başlangıç": bas_etiket,
+                "Bitiş": bit_etiket,
+            })
+
+            # --- USD versiyonu ---
+            usd_kur_bas = kur_getir("USD", bas_str)
+            usd_kur_bit = kur_getir("USD", bit_str)
+
+            dk_grup_usd = dk_grup.copy()
+            dk_grup_usd[bas_etiket] = dk_grup_usd[bas_etiket] / usd_kur_bas
+            dk_grup_usd[bit_etiket] = dk_grup_usd[bit_etiket] / usd_kur_bit
+            dk_grup_usd["Fark"] = dk_grup_usd[bit_etiket] - dk_grup_usd[bas_etiket]
+            dk_grup_usd["Fark %"] = dk_grup_usd.apply(
+                lambda r: (r["Fark"] / r[bas_etiket] * 100) if r[bas_etiket] > 0 else None,
+                axis=1
+            )
+
+            # --- Metrikler ---
+            mcol1, mcol2, mcol3 = st.columns(3)
+            mcol1.metric(f"Portföy ({bas_etiket})", f"{toplam_bas:,.0f} TL")
+            mcol2.metric(f"Portföy ({bit_etiket})", f"{toplam_bit:,.0f} TL")
+            fark_str = f"{toplam_fark:+,.0f} TL"
+            pct_str = f"({toplam_fark_pct:+.1f}%)" if toplam_fark_pct is not None else ""
+            mcol3.metric("Değişim", fark_str, delta=pct_str)
+
+            st.markdown("---")
+
+            # --- TL / USD sekmeleri ---
+            dk_tab_tl, dk_tab_usd = st.tabs(["🇹🇷 TL Bazında", "🇺🇸 USD Bazında"])
+
+            with dk_tab_tl:
+                st.dataframe(
+                    dk_grup.style.format({
+                        bas_etiket: "{:,.0f}",
+                        bit_etiket: "{:,.0f}",
+                        "Fark": "{:+,.0f}",
+                        "Fark %": "{:+.1f}%",
+                    }, na_rep="—"),
+                    use_container_width=True, hide_index=True
+                )
+
+            with dk_tab_usd:
+                st.dataframe(
+                    dk_grup_usd.style.format({
+                        bas_etiket: "${:,.0f}",
+                        bit_etiket: "${:,.0f}",
+                        "Fark": "${:+,.0f}",
+                        "Fark %": "{:+.1f}%",
+                    }, na_rep="—"),
+                    use_container_width=True, hide_index=True
+                )
+
+            # --- Varlık bazında detay ---
+            with st.expander("📋 Varlık Bazında Detay"):
+                detay = dk_df[["Kod", "Kategori", "PB", "Başlangıç", "Bitiş", "Fark", "Fark %"]].copy()
+                detay = detay.sort_values("Fark", ascending=False)
+
+                # USD versiyonu
+                detay_usd = detay.copy()
+                detay_usd["Başlangıç"] = detay_usd["Başlangıç"] / usd_kur_bas
+                detay_usd["Bitiş"] = detay_usd["Bitiş"] / usd_kur_bit
+                detay_usd["Fark"] = detay_usd["Bitiş"] - detay_usd["Başlangıç"]
+                detay_usd["Fark %"] = detay_usd.apply(
+                    lambda r: (r["Fark"] / r["Başlangıç"] * 100) if r["Başlangıç"] > 0 else None,
+                    axis=1
+                )
+
+                # Sütun isimlerini tarihle göster
+                detay = detay.rename(columns={"Başlangıç": bas_etiket, "Bitiş": bit_etiket})
+                detay_usd = detay_usd.rename(columns={"Başlangıç": bas_etiket, "Bitiş": bit_etiket})
+
+                detay_tl_tab, detay_usd_tab = st.tabs(["🇹🇷 TL", "🇺🇸 USD"])
+
+                with detay_tl_tab:
+                    st.dataframe(
+                        detay.style.format({
+                            bas_etiket: "{:,.0f}",
+                            bit_etiket: "{:,.0f}",
+                            "Fark": "{:+,.0f}",
+                            "Fark %": "{:+.1f}%",
+                        }, na_rep="—"),
+                        use_container_width=True, hide_index=True
+                    )
+
+                with detay_usd_tab:
+                    st.dataframe(
+                        detay_usd.style.format({
+                            bas_etiket: "${:,.0f}",
+                            bit_etiket: "${:,.0f}",
+                            "Fark": "${:+,.0f}",
+                            "Fark %": "{:+.1f}%",
+                        }, na_rep="—"),
+                        use_container_width=True, hide_index=True
+                    )
+
+            st.caption("ℹ️ Her tarih için: Değer = Son Fiyat × Net Adet × Kur (TL). "
+                       "USD versiyonunda her tarih kendi günündeki USD kuru ile çevrilir.")
+
+# ==========================================
 # SAYFA: YATIRIM FONLARI
 # ==========================================
 elif sayfa == "🏛️ Yatırım Fonları":
@@ -1946,6 +2123,284 @@ elif sayfa == "✏️ İşlem Düzenle":
                 import time
                 time.sleep(1)
                 st.rerun()
+
+# ==========================================
+# SAYFA: İŞLEM YÜKLE (Excel'den Toplu)
+# ==========================================
+elif sayfa == "📤 İşlem Yükle":
+    st.title("📤 Excel'den Toplu İşlem Yükle")
+    st.caption("İşlemlerinizi Excel dosyasında hazırlayıp toplu olarak yükleyin.")
+    st.markdown("---")
+
+    # ==========================================
+    # 1) ŞABLON İNDİR
+    # ==========================================
+    st.subheader("1️⃣ Şablon İndir")
+    st.info("Aşağıdaki butona basarak boş şablonu indirin, doldurun, sonra yükleyin.")
+
+    from openpyxl import Workbook as _Wb
+    from openpyxl.styles import Font as _Font, PatternFill as _Fill, Alignment as _Align
+    from io import BytesIO as _BytesIO
+
+    def sablon_olustur():
+        """Sütun başlıkları ve örnek satır içeren Excel şablonu oluşturur."""
+        wb = _Wb()
+        ws = wb.active
+        ws.title = "İşlemler"
+
+        # --- Başlıklar ---
+        basliklar = ["kod", "tarih", "islem_turu", "adet", "fiyat", "notlar", "araci_kurum", "portfoy_etiketi"]
+        baslik_font = _Font(bold=True, color="FFFFFF", size=11)
+        baslik_fill = _Fill("solid", fgColor="4472C4")
+        baslik_align = _Align(horizontal="center")
+
+        for col_no, baslik in enumerate(basliklar, 1):
+            hucre = ws.cell(row=1, column=col_no, value=baslik)
+            hucre.font = baslik_font
+            hucre.fill = baslik_fill
+            hucre.alignment = baslik_align
+
+        # --- Örnek satır ---
+        ornek = ["AAPL", "2025-06-15", "Alış", 10, 235.50, "İlk alım", "İş Yatırım", "Yatırım"]
+        ornek_font = _Font(color="808080", italic=True)
+        for col_no, deger in enumerate(ornek, 1):
+            hucre = ws.cell(row=2, column=col_no, value=deger)
+            hucre.font = ornek_font
+
+        # --- Sütun genişlikleri ---
+        genislikler = [14, 14, 14, 14, 14, 20, 18, 18]
+        for i, g in enumerate(genislikler, 1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = g
+
+        # --- Açıklama sayfası ---
+        ws2 = wb.create_sheet("Açıklama")
+        aciklamalar = [
+            ["Sütun", "Zorunlu?", "Açıklama", "Örnek Değerler"],
+            ["kod", "EVET", "Varlık kodu (varliklar tablosundaki kod)", "AAPL, GARAN, BTC"],
+            ["tarih", "EVET", "İşlem tarihi (YYYY-MM-DD formatında)", "2025-06-15"],
+            ["islem_turu", "EVET", "İşlem türü", "Alış, Satış, Temettü, Faiz, Komisyon"],
+            ["adet", "EVET", "Miktar (mevduatta bakiye tutarı)", "10, 0.5, 50000"],
+            ["fiyat", "EVET", "Birim fiyat (mevduatta 1 yazın)", "235.50, 1, 0.0045"],
+            ["notlar", "HAYIR", "Açıklama (boş bırakılabilir)", "İlk alım, Temettü ödemesi"],
+            ["araci_kurum", "HAYIR", "Aracı kurum adı (boş bırakılabilir)", "İş Yatırım, Akbank"],
+            ["portfoy_etiketi", "HAYIR", "Portföy etiketi (boş bırakılabilir)", "Yatırım, Defans"],
+        ]
+        for satir_no, satir in enumerate(aciklamalar, 1):
+            for col_no, deger in enumerate(satir, 1):
+                hucre = ws2.cell(row=satir_no, column=col_no, value=deger)
+                if satir_no == 1:
+                    hucre.font = baslik_font
+                    hucre.fill = baslik_fill
+                    hucre.alignment = baslik_align
+        for i, g in enumerate([12, 12, 45, 35], 1):
+            ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = g
+
+        buf = _BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    st.download_button(
+        label="📥 Boş Şablonu İndir (.xlsx)",
+        data=sablon_olustur(),
+        file_name="islem_sablonu.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # ==========================================
+    # 2) DOSYA YÜKLE
+    # ==========================================
+    st.markdown("---")
+    st.subheader("2️⃣ Dosya Yükle ve Kontrol Et")
+
+    yuklenen = st.file_uploader("Excel dosyanızı seçin (.xlsx)", type=["xlsx"], key="islem_yukle")
+
+    if yuklenen is not None:
+        try:
+            yukle_df = pd.read_excel(yuklenen, dtype={"kod": str, "notlar": str,
+                                                       "araci_kurum": str, "portfoy_etiketi": str})
+        except Exception as e:
+            st.error(f"Dosya okunamadı: {e}")
+            yukle_df = pd.DataFrame()
+
+        if not yukle_df.empty:
+            # --- Sütun adı kontrolü ---
+            zorunlu_sutunlar = ["kod", "tarih", "islem_turu", "adet", "fiyat"]
+            eksik_sutunlar = [s for s in zorunlu_sutunlar if s not in yukle_df.columns]
+
+            if eksik_sutunlar:
+                st.error(f"Eksik sütunlar: **{', '.join(eksik_sutunlar)}**. Şablondaki sütun adlarını kontrol edin.")
+            else:
+                # --- Boş satırları temizle ---
+                yukle_df = yukle_df.dropna(subset=["kod", "tarih", "islem_turu", "adet", "fiyat"])
+
+                if yukle_df.empty:
+                    st.warning("Dosyada geçerli veri satırı bulunamadı.")
+                else:
+                    # --- Opsiyonel sütunları ekle (yoksa) ---
+                    for opsiyonel in ["notlar", "araci_kurum", "portfoy_etiketi"]:
+                        if opsiyonel not in yukle_df.columns:
+                            yukle_df[opsiyonel] = ""
+                    yukle_df["notlar"]           = yukle_df["notlar"].fillna("").astype(str)
+                    yukle_df["araci_kurum"]      = yukle_df["araci_kurum"].fillna("").astype(str)
+                    yukle_df["portfoy_etiketi"]  = yukle_df["portfoy_etiketi"].fillna("").astype(str)
+
+                    # --- Tarih formatı düzelt ---
+                    try:
+                        yukle_df["tarih"] = pd.to_datetime(yukle_df["tarih"]).dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        st.error("Tarih sütunundaki değerler okunamadı. YYYY-MM-DD formatında olduğundan emin olun.")
+                        st.stop()
+
+                    # --- Kod büyük harfe ---
+                    yukle_df["kod"] = yukle_df["kod"].str.strip().str.upper()
+
+                    # ==========================================
+                    # 3) DOĞRULAMA
+                    # ==========================================
+                    baglanti = veritabani_baglan()
+                    varliklar_db = sql_oku("SELECT id, kod, tur FROM varliklar", baglanti)
+                    kod_id_map = dict(zip(varliklar_db["kod"], varliklar_db["id"]))
+                    kod_tur_map = dict(zip(varliklar_db["kod"], varliklar_db["tur"]))
+
+                    gecerli_turler = {"Alış", "Satış", "Temettü", "Faiz", "Komisyon", "Dış Giriş", "Dış Çıkış"}
+
+                    hatalar = []
+                    gecerli_satirlar = []
+
+                    for idx, row in yukle_df.iterrows():
+                        satir_no = idx + 2  # Excel'de 1. satır başlık, 2. satırdan veri başlar
+                        satir_hatalari = []
+
+                        # Kod kontrolü
+                        if row["kod"] not in kod_id_map:
+                            satir_hatalari.append(f"'{row['kod']}' kodu veritabanında bulunamadı")
+
+                        # İşlem türü kontrolü
+                        if row["islem_turu"] not in gecerli_turler:
+                            satir_hatalari.append(f"Geçersiz işlem türü: '{row['islem_turu']}'")
+
+                        # Sayısal alan kontrolü
+                        try:
+                            adet_val = float(row["adet"])
+                            if adet_val <= 0:
+                                satir_hatalari.append("Adet sıfır veya negatif olamaz")
+                        except (ValueError, TypeError):
+                            satir_hatalari.append(f"Adet sayısal değil: '{row['adet']}'")
+
+                        try:
+                            fiyat_val = float(row["fiyat"])
+                            if fiyat_val < 0:
+                                satir_hatalari.append("Fiyat negatif olamaz")
+                        except (ValueError, TypeError):
+                            satir_hatalari.append(f"Fiyat sayısal değil: '{row['fiyat']}'")
+
+                        if satir_hatalari:
+                            hatalar.append({"Satır": satir_no, "Kod": row["kod"],
+                                            "Hata": " | ".join(satir_hatalari)})
+                        else:
+                            # Mevduat kontrolü: fiyatı otomatik 1 yap
+                            varlik_tur = kod_tur_map.get(row["kod"], "")
+                            if varlik_tur in MEVDUAT_TURLERI:
+                                fiyat_val = 1.0
+
+                            gecerli_satirlar.append({
+                                "varlik_id"       : kod_id_map[row["kod"]],
+                                "kod"             : row["kod"],
+                                "tarih"           : row["tarih"],
+                                "islem_turu"      : row["islem_turu"],
+                                "adet"            : float(row["adet"]),
+                                "fiyat"           : fiyat_val,
+                                "tutar"           : round(float(row["adet"]) * fiyat_val, 4),
+                                "notlar"          : row["notlar"],
+                                "araci_kurum"     : row["araci_kurum"],
+                                "portfoy_etiketi" : row["portfoy_etiketi"],
+                            })
+
+                    # ==========================================
+                    # 4) SONUÇLARI GÖSTER
+                    # ==========================================
+                    st.markdown("---")
+                    st.subheader("3️⃣ Doğrulama Sonucu")
+
+                    toplam = len(yukle_df)
+                    gecerli = len(gecerli_satirlar)
+                    hatali = len(hatalar)
+
+                    r_col1, r_col2, r_col3 = st.columns(3)
+                    r_col1.metric("Toplam Satır", toplam)
+                    r_col2.metric("Geçerli", gecerli)
+                    r_col3.metric("Hatalı", hatali)
+
+                    # --- Hataları göster ---
+                    if hatalar:
+                        st.error(f"⚠️ {hatali} satırda hata bulundu:")
+                        hata_df = pd.DataFrame(hatalar)
+                        st.dataframe(hata_df, use_container_width=True, hide_index=True)
+
+                    # --- Geçerli satırları önizle ---
+                    if gecerli_satirlar:
+                        st.success(f"✅ {gecerli} satır yüklenmeye hazır:")
+                        onizleme_df = pd.DataFrame(gecerli_satirlar)
+                        st.dataframe(
+                            onizleme_df[["kod", "tarih", "islem_turu", "adet", "fiyat", "tutar",
+                                         "notlar", "araci_kurum", "portfoy_etiketi"]].style.format({
+                                "adet": "{:,.4f}",
+                                "fiyat": "{:,.4f}",
+                                "tutar": "{:,.4f}",
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+
+                        # ==========================================
+                        # 5) KAYDET
+                        # ==========================================
+                        st.markdown("---")
+                        if hatalar:
+                            st.warning("⚠️ Hatalı satırlar atlanacak, sadece geçerli satırlar kaydedilecek.")
+
+                        if st.button("💾 Geçerli İşlemleri Kaydet", type="primary"):
+                            import db as _db_mod
+                            _db_mod._baglanti = None
+                            baglanti = veritabani_baglan()
+                            cursor = baglanti.cursor()
+
+                            eklenen = 0
+                            # Turso timeout önlemi: 20'li chunk'lar
+                            chunk_boyut = 20
+
+                            for i, satir in enumerate(gecerli_satirlar):
+                                cursor.execute("""
+                                    INSERT INTO islemler
+                                        (varlik_id, tarih, islem_turu, adet, fiyat, tutar,
+                                         notlar, araci_kurum, portfoy_etiketi)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    satir["varlik_id"], satir["tarih"], satir["islem_turu"],
+                                    satir["adet"], satir["fiyat"], satir["tutar"],
+                                    satir["notlar"], satir["araci_kurum"], satir["portfoy_etiketi"],
+                                ))
+                                eklenen += 1
+
+                                # Chunk commit
+                                if (i + 1) % chunk_boyut == 0:
+                                    baglanti.commit()
+                                    senkronize_et()
+                                    _db_mod._baglanti = None
+                                    baglanti = veritabani_baglan()
+                                    cursor = baglanti.cursor()
+
+                            # Kalan kayıtları commit et
+                            baglanti.commit()
+                            senkronize_et()
+                            _db_mod._baglanti = None
+
+                            st.success(f"✅ {eklenen} işlem başarıyla kaydedildi!")
+                            import time
+                            time.sleep(2)
+                            st.rerun()
+                    else:
+                        st.warning("Geçerli satır bulunamadı. Lütfen hataları düzeltip tekrar yükleyin.")
 
 # ==========================================
 # SAYFA 8: İŞLEM GEÇMİŞİ
