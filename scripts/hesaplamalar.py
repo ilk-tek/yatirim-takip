@@ -1,11 +1,13 @@
 # ==========================================
 # HESAPLAMALAR
 # ==========================================
+import re
 import sqlite3
 import pandas as pd
 from db import baglan, sql_oku
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from calendar import monthrange
 
 def veritabani_baglan():
     return baglan()
@@ -662,6 +664,316 @@ def donemsel_karsilastirma_hesapla(baslangic_tarih, bitis_tarih):
             })
 
     return pd.DataFrame(sonuclar) if sonuclar else pd.DataFrame()
+
+
+# ==========================================
+# ==========================================
+# VIOP MODÜLÜ — HESAPLAMA FONKSİYONLARI
+# ==========================================
+# ==========================================
+# VIOP (Vadeli İşlem ve Opsiyon Piyasası) stratejileri için
+# hesaplama katmanı. Mevcut TWR/FIFO mantığından bağımsız:
+# bu fonksiyonlar viop_stratejiler, viop_bacaklar ve
+# viop_fiyat_gecmisi tablolarını kullanır.
+#
+# Sözleşme kodu formatları:
+#   Opsiyon: O_<DAYANAK><E|A><AAYY><C|P><STRIKE>
+#            Örn: O_XU030E0626C18000.00
+#   Future : F_<DAYANAK><AAYY>
+#            Örn: F_GARAN0826, F_XU0301226
+# ==========================================
+
+
+# Regex desenleri (modül seviyesinde tanımlı, her çağrıda yeniden derlenmesin diye)
+_VIOP_OPSIYON_PATTERN = re.compile(
+    r'^O_(.+)([EA])(\d{4})([CP])(\d+(?:\.\d+)?)$'
+)
+_VIOP_FUTURE_PATTERN = re.compile(
+    r'^F_(.+)(\d{4})$'
+)
+
+
+def viop_vade_tahmin(yil, ay):
+    """
+    Belirtilen ay/yıl için VIOP sözleşmesinin tahmini vade tarihini döndürür.
+
+    Mantık:
+      - Ayın son gününden geriye doğru git
+      - İlk hafta-içi günü (Pzt-Cuma) bul
+      - Dini bayramları dikkate ALMAZ — kullanıcı manuel onayla düzeltir
+
+    Parametreler:
+      yil : int  — örn. 2026
+      ay  : int  — 1-12
+
+    Dönen: "YYYY-MM-DD" formatında string
+
+    Örnek:
+      viop_vade_tahmin(2026, 6) → "2026-06-30" (Salı)
+      viop_vade_tahmin(2026, 8) → "2026-08-31" (Pazartesi)
+    """
+    # Ayın son günü (monthrange ay içindeki gün sayısını döndürür)
+    son_gun_no = monthrange(yil, ay)[1]
+    deneme = date(yil, ay, son_gun_no)
+
+    # Hafta sonuysa geriye doğru git (Cumartesi=5, Pazar=6)
+    while deneme.weekday() >= 5:
+        deneme = deneme - timedelta(days=1)
+
+    return deneme.strftime("%Y-%m-%d")
+
+
+def viop_sozlesme_parse(kod):
+    """
+    VIOP sözleşme kodundan alanları ayrıştırır.
+
+    Parametre:
+      kod : str — örn. "O_XU030E0626C18000.00" veya "F_GARAN0826"
+
+    Dönen dict:
+      enstruman_tipi : "Opsiyon" / "Future"
+      dayanak        : "XU030", "GARAN" vb.
+      vade           : "YYYY-MM-DD" (otomatik tahmin)
+      opsiyon_tipi   : "Call" / "Put" / None
+      strike         : float / None
+      opsiyon_stili  : "E" / "A" / None (bilgi amaçlı, tabloda saklanmaz)
+
+    Kod tanınamazsa None döner.
+
+    UI kullanımı: kullanıcı sözleşme kodu yazdığında bu fonksiyon
+    çağrılarak form alanları otomatik doldurulur, kullanıcı onaylar/düzeltir.
+    """
+    if not kod:
+        return None
+
+    kod = kod.strip().upper()
+
+    # --- Opsiyon mu? ---
+    m = _VIOP_OPSIYON_PATTERN.match(kod)
+    if m:
+        dayanak, stil, aayy, tip_harfi, strike_str = m.groups()
+        ay = int(aayy[:2])
+        yil_iki_hane = int(aayy[2:])
+        # 00-49 → 2000-2049, 50-99 → 1950-1999 (uygulamada hep 20xx olacak)
+        yil = 2000 + yil_iki_hane if yil_iki_hane < 50 else 1900 + yil_iki_hane
+
+        return {
+            "enstruman_tipi": "Opsiyon",
+            "dayanak"       : dayanak,
+            "vade"          : viop_vade_tahmin(yil, ay),
+            "opsiyon_tipi"  : "Call" if tip_harfi == "C" else "Put",
+            "strike"        : float(strike_str),
+            "opsiyon_stili" : stil,
+        }
+
+    # --- Future mı? ---
+    m = _VIOP_FUTURE_PATTERN.match(kod)
+    if m:
+        dayanak, aayy = m.groups()
+        ay = int(aayy[:2])
+        yil_iki_hane = int(aayy[2:])
+        yil = 2000 + yil_iki_hane if yil_iki_hane < 50 else 1900 + yil_iki_hane
+
+        return {
+            "enstruman_tipi": "Future",
+            "dayanak"       : dayanak,
+            "vade"          : viop_vade_tahmin(yil, ay),
+            "opsiyon_tipi"  : None,
+            "strike"        : None,
+            "opsiyon_stili" : None,
+        }
+
+    # Hiçbiri eşleşmedi
+    return None
+
+
+def viop_vadeye_kalan_gun(vade):
+    """
+    Bugünden vadeye kalan takvim gün sayısını döndürür.
+
+    Parametre:
+      vade : str ("YYYY-MM-DD") veya datetime.date
+
+    Dönen: int
+      - Pozitif: vade gelecekte
+      - 0      : vade bugün
+      - Negatif: vadesi geçmiş
+    """
+    if isinstance(vade, str):
+        vade_dt = datetime.strptime(vade, "%Y-%m-%d").date()
+    else:
+        vade_dt = vade
+    return (vade_dt - date.today()).days
+
+
+def viop_uyari_seviyesi(vade):
+    """
+    Vadeye kalan günlere göre UI uyarı seviyesi döndürür.
+
+    Eşikler (Aşama 1'de kararlaştırıldı, Seçenek 2):
+      "normal"  : 30 günden fazla
+      "sari"    : 7-30 gün arası
+      "turuncu" : 0-7 gün arası
+      "kirmizi" : vadesi geçmiş (negatif gün)
+
+    UI tarafında bu değere göre arka plan rengi seçilir.
+    """
+    kalan = viop_vadeye_kalan_gun(vade)
+    if kalan < 0:
+        return "kirmizi"
+    elif kalan <= 7:
+        return "turuncu"
+    elif kalan <= 30:
+        return "sari"
+    else:
+        return "normal"
+
+
+def viop_bacak_pnl(bacak, guncel_fiyat):
+    """
+    Tek bir VIOP bacağının anlık P&L'ini TL cinsinden hesaplar.
+
+    Formül (Aşama 1'de kararlaştırıldı):
+      P&L = (guncel_fiyat - acilis_fiyat) × adet × kontrat_carpani × yon_carpani
+      yon_carpani = +1 (Long), -1 (Short)
+
+    Parametreler:
+      bacak         : dict veya pandas Series — viop_bacaklar tablosundan satır
+                      ('yon', 'adet', 'kontrat_carpani', 'acilis_fiyat' alanlarını okur)
+      guncel_fiyat  : float — bacağın güncel uzlaşma fiyatı
+
+    Dönen: float (TL) veya None (güncel fiyat verilmemişse)
+
+    Örnek:
+      Short call: acilis=250, guncel=100, adet=1, carpan=10
+      → (100 - 250) × 1 × 10 × (-1) = +1500 TL kazanç (prim düştü, kazandık)
+    """
+    if guncel_fiyat is None or pd.isna(guncel_fiyat):
+        return None
+
+    yon = bacak["yon"]
+    yon_carpani = 1 if yon == "Long" else -1
+
+    adet   = float(bacak["adet"])
+    carpan = float(bacak["kontrat_carpani"])
+    acilis = float(bacak["acilis_fiyat"])
+
+    pnl = (float(guncel_fiyat) - acilis) * adet * carpan * yon_carpani
+    return round(pnl, 2)
+
+
+def viop_strateji_pnl(strateji_id):
+    """
+    Bir stratejinin TÜM bacaklarını gezip toplam P&L'ini hesaplar.
+
+    Mantık (her bacak için):
+      - Kapalı bacak (kapanis_fiyat doluysa): realized P&L (kapanış fiyatı üzerinden)
+      - Açık bacak (kapanis_fiyat NULL ise):  unrealized P&L (son uzlaşma fiyatı üzerinden)
+
+    Açık bacakların son fiyatı viop_fiyat_gecmisi'nden MAX(tarih) ile çekilir.
+    Bir bacağa hiç fiyat girilmediyse, o bacak P&L hesabına dahil edilmez
+    ama eksik_fiyat listesinde döner (UI uyarı için).
+
+    Parametre:
+      strateji_id : int
+
+    Dönen dict:
+      toplam_pnl  : float — TL cinsinden net P&L
+      detaylar    : list of dict — bacak bazında P&L detayı
+      eksik_fiyat : list of int — fiyat bulunamayan bacak ID'leri
+    """
+    baglanti = veritabani_baglan()
+
+    bacaklar = sql_oku(f"""
+        SELECT * FROM viop_bacaklar
+        WHERE strateji_id = {int(strateji_id)}
+    """, baglanti)
+
+    if bacaklar.empty:
+        return {"toplam_pnl": 0.0, "detaylar": [], "eksik_fiyat": []}
+
+    toplam = 0.0
+    detaylar = []
+    eksik = []
+
+    for _, bacak in bacaklar.iterrows():
+        # NULL/NaN kontrolü: libsql NULL'u NaN olarak döndürür, pd.isna() ile kontrol
+        kapanis_fiyat = bacak["kapanis_fiyat"]
+        bacak_kapali = not (kapanis_fiyat is None or pd.isna(kapanis_fiyat))
+
+        if bacak_kapali:
+            # Realized P&L: kapanış fiyatı kullanılır
+            guncel_fiyat = float(kapanis_fiyat)
+            durum = "kapali"
+        else:
+            # Unrealized P&L: son uzlaşma fiyatı çekilir
+            fiyat_df = sql_oku("""
+                SELECT fiyat FROM viop_fiyat_gecmisi
+                WHERE sozlesme_kodu = ?
+                ORDER BY tarih DESC LIMIT 1
+            """, baglanti, params=(bacak["sozlesme_kodu"],))
+
+            if fiyat_df.empty:
+                eksik.append(int(bacak["id"]))
+                continue
+
+            guncel_fiyat = float(fiyat_df.iloc[0]["fiyat"])
+            durum = "acik"
+
+        pnl = viop_bacak_pnl(bacak, guncel_fiyat)
+        if pnl is not None:
+            toplam += pnl
+            detaylar.append({
+                "bacak_id"      : int(bacak["id"]),
+                "sozlesme_kodu" : bacak["sozlesme_kodu"],
+                "durum"         : durum,
+                "guncel_fiyat"  : guncel_fiyat,
+                "pnl"           : pnl,
+            })
+
+    return {
+        "toplam_pnl"  : round(toplam, 2),
+        "detaylar"    : detaylar,
+        "eksik_fiyat" : eksik,
+    }
+
+
+def viop_strateji_durumu(strateji_id):
+    """
+    Bacakların kapanış durumuna bakarak stratejinin CANLI durumunu türetir.
+
+    Dönen:
+      "Açık"        : Tüm bacaklar açık (kapanis_tarih hepsi NULL)
+      "Kısmi Açık"  : Bir kısmı açık, bir kısmı kapalı
+      "Kapalı"      : Tüm bacaklar kapalı
+      "Bacak Yok"   : Stratejiye hiç bacak eklenmemiş (uç durum)
+
+    Hibrit yaklaşım (Aşama 1'de kararlaştırıldı):
+      - Bu fonksiyon canlı türetir (kaynak doğru)
+      - viop_stratejiler.durum alanı UI tarafında cache olarak güncellenir
+      - Tutarsızlık olursa bu fonksiyon doğruyu söyler
+    """
+    baglanti = veritabani_baglan()
+
+    bacaklar = sql_oku(f"""
+        SELECT kapanis_tarih FROM viop_bacaklar
+        WHERE strateji_id = {int(strateji_id)}
+    """, baglanti)
+
+    if bacaklar.empty:
+        return "Bacak Yok"
+
+    # NULL kontrolü: libsql NULL'u NaN olarak döndürür
+    # pd.isna() ile hem None hem NaN yakalanır
+    acik_sayisi   = int(bacaklar["kapanis_tarih"].isna().sum())
+    kapali_sayisi = int((~bacaklar["kapanis_tarih"].isna()).sum())
+
+    if acik_sayisi > 0 and kapali_sayisi == 0:
+        return "Açık"
+    elif acik_sayisi == 0 and kapali_sayisi > 0:
+        return "Kapalı"
+    else:
+        return "Kısmi Açık"
 
 
 if __name__ == "__main__":
