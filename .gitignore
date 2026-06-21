@@ -20,3 +20,15 @@ __pycache__/
 
 # Streamlit yerel ayarları
 .streamlit/
+
+# macOS sistem dosyaları
+.DS_Store
+
+# pyenv yerel sürüm dosyası (her bilgisayarda farklı olabilir)
+.python-version
+
+# VS Code kişisel ayarları (her bilgisayarda ayrı kalmalı)
+.vscode/
+
+# nano/editör yedek dosyaları
+*.save
