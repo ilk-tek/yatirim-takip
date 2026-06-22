@@ -149,6 +149,7 @@ if ADMIN_MOD:
         "✏️ Varlık Düzenle",
         "➕ VIOP Strateji Ekle",
         "✏️ VIOP Strateji Düzenle",
+        "💱 VIOP Fiyat Güncelle",
         "💰 İşlem Ekle",
         "✏️ İşlem Düzenle",
         "📤 İşlem Yükle",
@@ -3618,6 +3619,362 @@ elif sayfa == "✏️ VIOP Strateji Düzenle":
                 import time
                 time.sleep(1.5)
                 st.rerun()
+
+# ==========================================
+# SAYFA: VIOP FİYAT GÜNCELLE (Aşama 5.3)
+# ==========================================
+# Üç bölüm:
+#   1) Sözleşme Fiyat Girişi (st.data_editor ile toplu)
+#   2) Tüm Sözleşmelerin Son Fiyatları (stale uyarı renkli)
+#   3) Teminat Snapshot Girişi + son 10 snapshot
+elif sayfa == "💱 VIOP Fiyat Güncelle":
+    st.title("💱 VIOP Fiyat Güncelle")
+    st.markdown("---")
+
+    from datetime import datetime as _dt_viop_fg
+
+    baglanti = veritabani_baglan()
+
+    # Tüm bacakları tek sorguyla çek
+    bacaklar_tum_fg = sql_oku("SELECT * FROM viop_bacaklar", baglanti)
+
+    # Sayfa bölünmesi: 1+2 (fiyat girişi+görüntü) bacak varsa render edilir.
+    # 3 (teminat snapshot) her zaman render edilir, bacak yokken bile kullanılabilir.
+
+    if bacaklar_tum_fg.empty:
+        st.info(
+            "Henüz VIOP bacağı yok. Önce **➕ VIOP Strateji Ekle** sayfasından "
+            "bir strateji ekleyin (fiyat girişi için sözleşme kodları oradan gelir)."
+        )
+        sozlesme_kodlari_fg = []
+        son_fiyatlar_fg    = {}
+    else:
+        acik_bacaklar_fg = bacaklar_tum_fg[bacaklar_tum_fg["kapanis_tarih"].isna()]
+
+        # --- Checkbox: kapalı bacakları da göster ---
+        kapali_dahil_fg = st.checkbox(
+            "Kapalı bacakların sözleşme kodlarını da göster",
+            value=False,
+            key="viop_fg_kapali_dahil",
+            help="İşaretlerseniz kapalı bacakların sözleşme kodları da listede görünür "
+                 "(geriye dönük fiyat girişi veya kontrol için).",
+        )
+
+        # Hangi sözleşme kodlarını listeyleyeceğiz (DISTINCT)
+        if kapali_dahil_fg:
+            sozlesme_kodlari_fg = sorted(bacaklar_tum_fg["sozlesme_kodu"].unique().tolist())
+        else:
+            if acik_bacaklar_fg.empty:
+                sozlesme_kodlari_fg = []
+            else:
+                sozlesme_kodlari_fg = sorted(acik_bacaklar_fg["sozlesme_kodu"].unique().tolist())
+
+        # --- Her sözleşmenin son fiyatını çek ---
+        son_fiyatlar_fg = {}  # sozlesme_kodu -> (fiyat, tarih)
+        for kod_fg in sozlesme_kodlari_fg:
+            sf_df_fg = sql_oku(
+                "SELECT fiyat, tarih FROM viop_fiyat_gecmisi "
+                "WHERE sozlesme_kodu = ? ORDER BY tarih DESC LIMIT 1",
+                baglanti, params=(kod_fg,),
+            )
+            if not sf_df_fg.empty:
+                son_fiyatlar_fg[kod_fg] = (
+                    float(sf_df_fg.iloc[0]["fiyat"]),
+                    sf_df_fg.iloc[0]["tarih"],
+                )
+            else:
+                son_fiyatlar_fg[kod_fg] = (None, None)
+
+    # ==========================================
+    # BÖLÜM 1: SÖZLEŞME FİYAT GİRİŞİ
+    # ==========================================
+    if sozlesme_kodlari_fg:
+        st.subheader("📈 Sözleşme Fiyat Girişi")
+        st.caption(
+            "**Yeni Fiyat** sütununu doldurun, boş bırakılan satırlar atlanır. "
+            "Aynı sözleşme + tarih için varolan kayıt üzerine yazılır."
+        )
+
+        # Tek tarih input, tüm satırlara uygulanır
+        giris_tarih_fg = st.date_input(
+            "Tarih (tüm satırlara uygulanır)",
+            value=date.today(),
+            max_value=date.today(),
+            key="viop_fg_giris_tarih",
+            help="Geriye dönük girişlere izin verilir, gelecek tarih kabul edilmez.",
+        )
+
+        # DataFrame'i oluştur
+        df_giris_fg = pd.DataFrame({
+            "Sözleşme Kodu"    : sozlesme_kodlari_fg,
+            "Mevcut Son Fiyat" : [
+                son_fiyatlar_fg[k][0] if son_fiyatlar_fg[k][0] is not None else None
+                for k in sozlesme_kodlari_fg
+            ],
+            "Son Fiyat Tarihi" : [
+                son_fiyatlar_fg[k][1] if son_fiyatlar_fg[k][1] is not None else "—"
+                for k in sozlesme_kodlari_fg
+            ],
+            "Yeni Fiyat"       : [None] * len(sozlesme_kodlari_fg),
+        })
+
+        # st.data_editor ile düzenlenebilir tablo
+        edited_df_fg = st.data_editor(
+            df_giris_fg,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Sözleşme Kodu": st.column_config.TextColumn(
+                    "Sözleşme Kodu", disabled=True,
+                ),
+                "Mevcut Son Fiyat": st.column_config.NumberColumn(
+                    "Mevcut Son Fiyat",
+                    format="%.2f", disabled=True,
+                    help="Referans için son kayıtlı fiyat (yoksa boş).",
+                ),
+                "Son Fiyat Tarihi": st.column_config.TextColumn(
+                    "Son Fiyat Tarihi", disabled=True,
+                ),
+                "Yeni Fiyat": st.column_config.NumberColumn(
+                    "Yeni Fiyat",
+                    format="%.2f",
+                    min_value=0.0,
+                    help="Pozitif veya sıfır. Boş bırakılırsa atlanır.",
+                ),
+            },
+            key="viop_fg_editor",
+        )
+
+        if st.button("💾 Fiyatları Kaydet", type="primary", key="viop_fg_kaydet_btn"):
+            # Doldurulmuş satırları topla
+            yeni_fiyatlar_fg = []  # liste of (kod, fiyat)
+            hatalar_fg = []
+
+            for _, row_fg in edited_df_fg.iterrows():
+                yf_fg = row_fg["Yeni Fiyat"]
+                if yf_fg is None or pd.isna(yf_fg):
+                    continue  # boş bırakıldı, atla
+                if yf_fg < 0:
+                    hatalar_fg.append(
+                        f"{row_fg['Sözleşme Kodu']}: Fiyat negatif olamaz ({yf_fg})."
+                    )
+                    continue
+                yeni_fiyatlar_fg.append((row_fg["Sözleşme Kodu"], float(yf_fg)))
+
+            if hatalar_fg:
+                for h_fg in hatalar_fg:
+                    st.error(f"❌ {h_fg}")
+            elif not yeni_fiyatlar_fg:
+                st.warning(
+                    "⚠️ Kaydedilecek fiyat yok. Lütfen en az bir 'Yeni Fiyat' "
+                    "hücresini doldurun."
+                )
+            else:
+                # Turso stream timeout fix
+                import db as _db_fg
+                _db_fg._baglanti = None
+                baglanti_fg_w = veritabani_baglan()
+                cursor_fg_w   = baglanti_fg_w.cursor()
+
+                tarih_str_fg = giris_tarih_fg.strftime("%Y-%m-%d")
+
+                for kod_w, fiyat_w in yeni_fiyatlar_fg:
+                    # Önce aynı tarih+kod için varolan kaydı sil
+                    cursor_fg_w.execute(
+                        "DELETE FROM viop_fiyat_gecmisi "
+                        "WHERE sozlesme_kodu = ? AND tarih = ?",
+                        (kod_w, tarih_str_fg),
+                    )
+                    # Yeni kaydı ekle
+                    cursor_fg_w.execute(
+                        "INSERT INTO viop_fiyat_gecmisi "
+                        "(sozlesme_kodu, tarih, fiyat, kaynak) "
+                        "VALUES (?, ?, ?, ?)",
+                        (kod_w, tarih_str_fg, fiyat_w, "manuel"),
+                    )
+
+                baglanti_fg_w.commit()
+                senkronize_et()
+                _db_fg._baglanti = None
+
+                st.success(
+                    f"✅ {len(yeni_fiyatlar_fg)} sözleşme fiyatı kaydedildi "
+                    f"({tarih_str_fg})."
+                )
+                import time
+                time.sleep(1.5)
+                st.rerun()
+
+        # ==========================================
+        # BÖLÜM 2: TÜM SÖZLEŞMELERİN SON FİYATLARI
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🗓️ Tüm Sözleşmelerin Son Fiyatları")
+        st.caption(
+            "Sözleşmelerin en son kayıtlı fiyatları ve veri yaşı. "
+            "7+ gün sarı, 30+ gün kırmızı (stale veri uyarısı)."
+        )
+
+        bugun_fg = date.today()
+        son_fiyat_tablo_satirlari = []
+        renkler_fg = []
+
+        for kod_g in sozlesme_kodlari_fg:
+            fiyat_son_g, tarih_son_g = son_fiyatlar_fg[kod_g]
+
+            if fiyat_son_g is None:
+                fiyat_str_g = "—"
+                tarih_str_g = "—"
+                yas_str_g   = "—"
+                durum_str_g = "⚪ Veri yok"
+                renk_g      = "#F5F5F5"  # gri
+            else:
+                fiyat_str_g = f"{fiyat_son_g:,.2f}"
+                tarih_str_g = tarih_son_g
+
+                try:
+                    tarih_dt_g = _dt_viop_fg.strptime(tarih_son_g, "%Y-%m-%d").date()
+                    yas_gun_g = (bugun_fg - tarih_dt_g).days
+                except (ValueError, TypeError):
+                    yas_gun_g = 0
+
+                if yas_gun_g == 0:
+                    yas_str_g = "bugün"
+                elif yas_gun_g == 1:
+                    yas_str_g = "dün"
+                else:
+                    yas_str_g = f"{yas_gun_g} gün önce"
+
+                if yas_gun_g >= 30:
+                    durum_str_g = "🔴 Stale"
+                    renk_g      = "#FFE0E0"
+                elif yas_gun_g >= 7:
+                    durum_str_g = "🟡 Eski"
+                    renk_g      = "#FFF9C4"
+                else:
+                    durum_str_g = "🟢 Güncel"
+                    renk_g      = ""
+
+            son_fiyat_tablo_satirlari.append({
+                "Sözleşme Kodu" : kod_g,
+                "Son Fiyat"     : fiyat_str_g,
+                "Tarih"         : tarih_str_g,
+                "Veri Yaşı"     : yas_str_g,
+                "Durum"         : durum_str_g,
+            })
+            renkler_fg.append(renk_g)
+
+        son_fiyat_tablo_df = pd.DataFrame(son_fiyat_tablo_satirlari)
+
+        def _renkli_satir_fg(row):
+            idx_r = int(row.name)
+            if 0 <= idx_r < len(renkler_fg) and renkler_fg[idx_r]:
+                return [f"background-color: {renkler_fg[idx_r]}"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            son_fiyat_tablo_df.style.apply(_renkli_satir_fg, axis=1),
+            use_container_width=True, hide_index=True,
+        )
+
+    # ==========================================
+    # BÖLÜM 3: TEMİNAT SNAPSHOT GİRİŞİ
+    # ==========================================
+    st.markdown("---")
+    st.subheader("🔒 Teminat Snapshot Girişi")
+    st.caption(
+        "Portföy seviyesinde toplam VIOP teminat kullanımını kaydedin. "
+        "Düşük sıklıkta yapılır (örn. haftada bir, ya da pozisyon açma/kapama sonrası). "
+        "Aynı tarih için varolan kayıt üzerine yazılır."
+    )
+
+    col_t1, col_t2, col_t3 = st.columns([1, 1, 2])
+
+    with col_t1:
+        teminat_tarih_fg = st.date_input(
+            "Tarih",
+            value=date.today(),
+            max_value=date.today(),
+            key="viop_fg_teminat_tarih",
+        )
+
+    with col_t2:
+        teminat_tutar_fg = st.number_input(
+            "Tutar (TL)",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            format="%.2f",
+            key="viop_fg_teminat_tutar",
+        )
+
+    with col_t3:
+        teminat_aciklama_fg = st.text_input(
+            "Açıklama (opsiyonel)",
+            placeholder="Örn: Strangle açıldı, Bear spread kapandı...",
+            key="viop_fg_teminat_aciklama",
+        )
+
+    if st.button("💾 Snapshot Kaydet", type="primary", key="viop_fg_teminat_kaydet_btn"):
+        if teminat_tutar_fg < 0:
+            st.error("❌ Tutar negatif olamaz.")
+        else:
+            # Turso fix
+            import db as _db_ft
+            _db_ft._baglanti = None
+            baglanti_ft = veritabani_baglan()
+            cursor_ft   = baglanti_ft.cursor()
+
+            tarih_t_str_fg = teminat_tarih_fg.strftime("%Y-%m-%d")
+
+            # Aynı tarih için varolanı sil (idempotent)
+            cursor_ft.execute(
+                "DELETE FROM viop_teminat_anlik WHERE tarih = ?",
+                (tarih_t_str_fg,),
+            )
+            cursor_ft.execute(
+                "INSERT INTO viop_teminat_anlik "
+                "(tarih, teminat_tutari, aciklama) VALUES (?, ?, ?)",
+                (
+                    tarih_t_str_fg,
+                    float(teminat_tutar_fg),
+                    teminat_aciklama_fg.strip() if teminat_aciklama_fg else None,
+                ),
+            )
+
+            baglanti_ft.commit()
+            senkronize_et()
+            _db_ft._baglanti = None
+
+            st.success(
+                f"✅ Teminat snapshot kaydedildi: {tarih_t_str_fg} → "
+                f"{teminat_tutar_fg:,.0f} TL"
+            )
+            import time
+            time.sleep(1.5)
+            st.rerun()
+
+    # --- Son 10 snapshot tablosu ---
+    st.markdown("##### Son 10 Snapshot")
+
+    teminat_son10_fg = sql_oku("""
+        SELECT tarih, teminat_tutari, aciklama
+        FROM viop_teminat_anlik
+        ORDER BY tarih DESC LIMIT 10
+    """, baglanti)
+
+    if teminat_son10_fg.empty:
+        st.info("Henüz teminat snapshot kaydı yok.")
+    else:
+        teminat_son10_fg["aciklama"] = teminat_son10_fg["aciklama"].fillna("—")
+        st.dataframe(
+            teminat_son10_fg.rename(columns={
+                "tarih"          : "Tarih",
+                "teminat_tutari" : "Tutar (TL)",
+                "aciklama"       : "Açıklama",
+            }).style.format({"Tutar (TL)": "{:,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
 
 # ==========================================
 # SAYFA 6: İŞLEM EKLE
