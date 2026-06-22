@@ -24,6 +24,8 @@ from hesaplamalar import (
     viop_strateji_pnl, viop_strateji_durumu,
     # VIOP CRUD için (Aşama 5.2'de eklendi)
     viop_sozlesme_parse, viop_carpan_tahmin,
+    # VIOP portföy entegrasyonu (Aşama 5.4.A)
+    viop_portfoy_degeri,
 )
 from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
@@ -338,6 +340,21 @@ if sayfa == "📊 Portföy":
             ozet_df = pd.DataFrame(ozet)
 
             # ==========================================
+            # VIOP PORTFÖY ENTEGRASYONU (Aşama 5.4.A)
+            # ==========================================
+            # Top metric'lere VIOP'un değer/maliyet/K-Z'sini ekle, ayrıca
+            # alt hiyerarşide kullanmak üzere viop_ozet sözlüğünü hazırla.
+            viop_ozet = viop_portfoy_degeri()
+
+            if viop_ozet["var_mi"]:
+                portfoy_toplam_maliyet += viop_ozet["maliyet_tl"]
+                toplam_deger           += viop_ozet["deger_tl"]
+
+            # VIOP uyarı banner'ı (teminat snapshot yoksa)
+            if viop_ozet["uyari"]:
+                st.warning(f"⚠️ {viop_ozet['uyari']}")
+
+            # ==========================================
             # TOPLAM METRİKLER (en üstte)
             # ==========================================
             toplam_kar    = toplam_deger - portfoy_toplam_maliyet
@@ -394,6 +411,10 @@ if sayfa == "📊 Portföy":
 
             portfoy_toplam_tl = ozet_df["Değer (TL)"].sum()
 
+            # VIOP varsa pay hesabına dahil et (Aşama 5.4.A)
+            if viop_ozet["var_mi"]:
+                portfoy_toplam_tl += viop_ozet["deger_tl"]
+
             # --- Yardımcı fonksiyonlar ---
             def pf_deger_str(filtre_df, toplam):
                 """Değer + pay string'i oluşturur."""
@@ -430,6 +451,82 @@ if sayfa == "📊 Portföy":
                                     "Değer (USD)" : "${:,.0f}",
                                 }),
                                 use_container_width=True, hide_index=True
+                            )
+
+            # ==========================================
+            # VIOP EXPOSURE EXPANDER (Aşama 5.4.A)
+            # ==========================================
+            # VIOP varsa, normal exposurelardan sonra ayrı bir "VIOP" başlığı.
+            # İçinde "VIOP Stratejileri" türü → aracı kurum bazında özet tablo.
+            if viop_ozet["var_mi"]:
+                viop_deger_tl  = viop_ozet["deger_tl"]
+                viop_deger_usd = viop_deger_tl / usd_kuru_bugun
+                viop_pay       = (viop_deger_tl / portfoy_toplam_tl * 100) if portfoy_toplam_tl else 0
+
+                viop_baslik = (
+                    f"📂 VIOP  —  "
+                    f"**{viop_deger_tl:,.0f} TL** | "
+                    f"**${viop_deger_usd:,.0f}** | "
+                    f"Pay: **%{viop_pay:.1f}**"
+                )
+
+                with st.expander(viop_baslik):
+                    # "VIOP Stratejileri" alt-expander
+                    with st.expander(
+                        f"📄 VIOP Stratejileri  —  "
+                        f"**{viop_deger_tl:,.0f} TL** | "
+                        f"**${viop_deger_usd:,.0f}** | "
+                        f"Pay: **%{viop_pay:.1f}**",
+                        expanded=True,
+                    ):
+                        # Aracı kurum bazında satır oluştur
+                        ak_dagilim_pf = viop_ozet["araci_kurum_dagilim"]
+                        kapatilmis_pf = viop_ozet["kapatilmis_teminat"]
+
+                        viop_tablo_satirlari = []
+                        for ak_pf, ak_data in ak_dagilim_pf.items():
+                            viop_tablo_satirlari.append({
+                                "Aracı Kurum"     : ak_pf,
+                                "Açık Strateji"   : ak_data["acik_strateji_sayisi"],
+                                "Değer (TL)"      : ak_data["deger_tl"],
+                                "Değer (USD)"     : ak_data["deger_usd"],
+                            })
+
+                        # "VIOP (kapatılmış)" varsa ayrı satır
+                        if kapatilmis_pf > 0 and not ak_dagilim_pf:
+                            # Sadece kapatılmış teminat var (açık strateji yok)
+                            viop_tablo_satirlari.append({
+                                "Aracı Kurum"     : "(kapatılmış — duran teminat)",
+                                "Açık Strateji"   : 0,
+                                "Değer (TL)"      : kapatilmis_pf,
+                                "Değer (USD)"     : kapatilmis_pf / usd_kuru_bugun,
+                            })
+
+                        if viop_tablo_satirlari:
+                            viop_tablo_df_pf = pd.DataFrame(viop_tablo_satirlari)
+                            viop_tablo_df_pf = viop_tablo_df_pf.sort_values(
+                                "Değer (TL)", ascending=False
+                            )
+                            st.dataframe(
+                                viop_tablo_df_pf.style.format({
+                                    "Değer (TL)"  : "{:,.0f}",
+                                    "Değer (USD)" : "${:,.0f}",
+                                }),
+                                use_container_width=True, hide_index=True,
+                            )
+
+                        # Tablonun altında özet bilgi
+                        kz_renk = "🟢" if viop_ozet["kz_tl"] >= 0 else "🔴"
+                        st.markdown(
+                            f"{kz_renk} **Unrealized P&L:** {viop_ozet['kz_tl']:+,.0f} TL  |  "
+                            f"⏰ **Vadesi yaklaşan:** {viop_ozet['vadesi_yaklasan_sayisi']} strateji  |  "
+                            f"Detay için ⚡ **VIOP Stratejileri** sayfasına gidin."
+                        )
+
+                        if viop_ozet["teminat_tarihi"]:
+                            st.caption(
+                                f"ℹ️ Değer hesabı için kullanılan teminat snapshot tarihi: "
+                                f"**{viop_ozet['teminat_tarihi']}**"
                             )
 
         else:
@@ -492,7 +589,11 @@ elif sayfa == "🏦 Aracı Kurum":
     """, baglanti)
 
     if islem_bazli.empty:
-        st.info("Henüz işlem girilmemiş.")
+        # Mevcut işlem yok ama VIOP olabilir — kontrol edelim
+        viop_ozet_ak = viop_portfoy_degeri()
+        if not viop_ozet_ak["var_mi"]:
+            st.info("Henüz işlem girilmemiş.")
+            viop_ozet_ak = None
     else:
         # Boş aracı kurum → "Belirtilmemiş"
         islem_bazli["Aracı Kurum"] = islem_bazli["araci_kurum_ham"].apply(
@@ -518,6 +619,15 @@ elif sayfa == "🏦 Aracı Kurum":
         islem_bazli["Değer (TL)"]  = deger_tl
         islem_bazli["Değer (USD)"] = deger_usd
 
+        # ==========================================
+        # VIOP ENTEGRASYONU (Aşama 5.4.A)
+        # ==========================================
+        viop_ozet_ak = viop_portfoy_degeri()
+
+        # VIOP uyarı banner'ı (teminat snapshot yoksa)
+        if viop_ozet_ak["uyari"]:
+            st.warning(f"⚠️ {viop_ozet_ak['uyari']}")
+
         # --- Yardımcı fonksiyonlar ---
         def deger_ozet(df_filtre):
             """Değer toplamlarını döndürür."""
@@ -534,14 +644,38 @@ elif sayfa == "🏦 Aracı Kurum":
             )
 
         # --- Expander'lar ---
-        araci_kurumlar = sorted(islem_bazli["Aracı Kurum"].unique())
+        # Mevcut araci kurumlar + VIOP'ta görünen broker'lar
+        araci_kurumlar = set(islem_bazli["Aracı Kurum"].unique())
+        ak_dagilim_ak  = viop_ozet_ak["araci_kurum_dagilim"]
+        for ak_v in ak_dagilim_ak.keys():
+            araci_kurumlar.add(ak_v)
+        araci_kurumlar = sorted(araci_kurumlar)
 
         for araci in araci_kurumlar:
-            ak_df = islem_bazli[islem_bazli["Aracı Kurum"] == araci]
-            ak_oz = deger_ozet(ak_df)
+            # Bu broker'ın varlık (klasik) ve VIOP toplamı
+            if araci in islem_bazli["Aracı Kurum"].values:
+                ak_df = islem_bazli[islem_bazli["Aracı Kurum"] == araci]
+            else:
+                ak_df = pd.DataFrame(columns=islem_bazli.columns)
 
-            with st.expander(f"🏦 {araci}  —  {deger_str(ak_oz)}"):
-                turler = sorted(ak_df["tur"].unique())
+            ak_oz_temel = deger_ozet(ak_df)
+
+            # VIOP katkısı (varsa)
+            viop_ak_data = ak_dagilim_ak.get(araci)
+            if viop_ak_data is not None:
+                ak_oz_toplam = {
+                    "Değer (TL)"  : ak_oz_temel["Değer (TL)"]  + viop_ak_data["deger_tl"],
+                    "Değer (USD)" : ak_oz_temel["Değer (USD)"] + viop_ak_data["deger_usd"],
+                }
+            else:
+                ak_oz_toplam = ak_oz_temel
+
+            with st.expander(f"🏦 {araci}  —  {deger_str(ak_oz_toplam)}"):
+                # Türler — klasik varlıklar
+                if not ak_df.empty:
+                    turler = sorted(ak_df["tur"].unique())
+                else:
+                    turler = []
 
                 for tur in turler:
                     tur_df = ak_df[ak_df["tur"] == tur]
@@ -578,6 +712,125 @@ elif sayfa == "🏦 Aracı Kurum":
                             }),
                             use_container_width=True
                         )
+
+                # --- VIOP Stratejileri türü (bu broker için) ---
+                if viop_ak_data is not None:
+                    viop_tur_oz = {
+                        "Değer (TL)"  : viop_ak_data["deger_tl"],
+                        "Değer (USD)" : viop_ak_data["deger_usd"],
+                    }
+                    with st.expander(
+                        f"📂 VIOP Stratejileri  —  {deger_str(viop_tur_oz)}",
+                        expanded=False,
+                    ):
+                        # Bu broker'daki stratejiler listesi
+                        viop_strat_satirlari = []
+                        for det_ak in viop_ak_data["stratejiler"]:
+                            seviye_ak = (viop_uyari_seviyesi(det_ak["en_yakin_vade"])
+                                         if det_ak["en_yakin_vade"] else "normal")
+                            emoji_ak = {"normal":"🟢", "sari":"🟡",
+                                        "turuncu":"🟠", "kirmizi":"🔴"}.get(seviye_ak, "🟢")
+
+                            viop_strat_satirlari.append({
+                                "Durum"        : emoji_ak,
+                                "Strateji Adı" : det_ak["ad"],
+                                "Tipi"         : det_ak["tipi"] if det_ak["tipi"] else "—",
+                                "Açık Bacak"   : det_ak["acik_bacak"],
+                                "En Yakın Vade": det_ak["en_yakin_vade"] or "—",
+                                "Unrealized P&L (TL)": det_ak["kz_tl"],
+                            })
+
+                        if viop_strat_satirlari:
+                            st.markdown("**Stratejiler**")
+                            st.dataframe(
+                                pd.DataFrame(viop_strat_satirlari).style.format({
+                                    "Unrealized P&L (TL)": "{:+,.0f}",
+                                }),
+                                use_container_width=True, hide_index=True,
+                            )
+
+                        # Bu broker için özet metrik
+                        st.markdown(
+                            f"📊 **Özet:** {viop_ak_data['acik_strateji_sayisi']} açık strateji  |  "
+                            f"⏰ Vadesi yaklaşan: {viop_ak_data['vadesi_yaklasan_sayisi']}  |  "
+                            f"💼 Maliyet: {viop_ak_data['maliyet_tl']:,.0f} TL  |  "
+                            f"💰 Unrealized P&L: {viop_ak_data['kz_tl']:+,.0f} TL"
+                        )
+
+        # ==========================================
+        # "VIOP (kapatılmış)" — Broker'sız duran teminat
+        # ==========================================
+        # Açık strateji yok ama teminat hala VIOP hesabında duruyor.
+        # Hangi broker'a atfedileceği belirsiz → ayrı bir expander.
+        if viop_ozet_ak["kapatilmis_teminat"] > 0:
+            kapt = viop_ozet_ak["kapatilmis_teminat"]
+            kapt_usd = kapt / usd_kuru_bugun
+
+            with st.expander(
+                f"💤 VIOP (kapatılmış — duran teminat)  —  "
+                f"Değer: **{kapt:,.0f} TL** | USD: **${kapt_usd:,.0f}**"
+            ):
+                st.info(
+                    "Bu tutar, açık VIOP stratejisi olmayan ama teminat hesabında "
+                    "hala duran nakit anlamına gelir. Aracı kurum atfı yapılamadığı "
+                    "için ayrı satır olarak gösteriliyor."
+                )
+                if viop_ozet_ak["teminat_tarihi"]:
+                    st.caption(
+                        f"ℹ️ Son teminat snapshot tarihi: **{viop_ozet_ak['teminat_tarihi']}**"
+                    )
+
+    # ==========================================
+    # İŞLEM YOKSA AMA VIOP VARSA — Aracı Kurum sayfası boşa düşmesin
+    # ==========================================
+    # if islem_bazli.empty bloğundaki erken çıkışta viop_ozet_ak set edilmiş olabilir.
+    # Eğer islem yok ama VIOP varsa, sadece VIOP bloğunu render et.
+    if islem_bazli.empty and viop_ozet_ak is not None and viop_ozet_ak["var_mi"]:
+        if viop_ozet_ak["uyari"]:
+            st.warning(f"⚠️ {viop_ozet_ak['uyari']}")
+
+        st.markdown("### VIOP Pozisyonları")
+
+        ak_dagilim_ak2 = viop_ozet_ak["araci_kurum_dagilim"]
+        for ak_v2, data_v2 in ak_dagilim_ak2.items():
+            with st.expander(
+                f"🏦 {ak_v2}  —  Değer: **{data_v2['deger_tl']:,.0f} TL** | "
+                f"USD: **${data_v2['deger_usd']:,.0f}**"
+            ):
+                # Stratejiler listesi
+                viop_strat_satirlari2 = []
+                for det_ak2 in data_v2["stratejiler"]:
+                    seviye_ak2 = (viop_uyari_seviyesi(det_ak2["en_yakin_vade"])
+                                  if det_ak2["en_yakin_vade"] else "normal")
+                    emoji_ak2 = {"normal":"🟢", "sari":"🟡",
+                                 "turuncu":"🟠", "kirmizi":"🔴"}.get(seviye_ak2, "🟢")
+                    viop_strat_satirlari2.append({
+                        "Durum"        : emoji_ak2,
+                        "Strateji Adı" : det_ak2["ad"],
+                        "Tipi"         : det_ak2["tipi"] if det_ak2["tipi"] else "—",
+                        "Açık Bacak"   : det_ak2["acik_bacak"],
+                        "En Yakın Vade": det_ak2["en_yakin_vade"] or "—",
+                        "Unrealized P&L (TL)": det_ak2["kz_tl"],
+                    })
+                if viop_strat_satirlari2:
+                    st.dataframe(
+                        pd.DataFrame(viop_strat_satirlari2).style.format({
+                            "Unrealized P&L (TL)": "{:+,.0f}",
+                        }),
+                        use_container_width=True, hide_index=True,
+                    )
+
+        # Kapatılmış teminat varsa
+        if viop_ozet_ak["kapatilmis_teminat"] > 0:
+            kapt2 = viop_ozet_ak["kapatilmis_teminat"]
+            kapt2_usd = kapt2 / usd_kuru_bugun
+            with st.expander(
+                f"💤 VIOP (kapatılmış — duran teminat)  —  "
+                f"Değer: **{kapt2:,.0f} TL** | USD: **${kapt2_usd:,.0f}**"
+            ):
+                st.info(
+                    "Açık VIOP stratejisi yok, ama teminat hesabında nakit duruyor."
+                )
 
 
 # ==========================================

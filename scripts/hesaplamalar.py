@@ -1019,6 +1019,263 @@ def viop_strateji_durumu(strateji_id):
         return "Kısmi Açık"
 
 
+# ==========================================
+# VIOP PORTFÖY DEĞER HESABI (Aşama 5.4.A)
+# ==========================================
+def viop_portfoy_degeri(tarih=None):
+    """
+    VIOP varlık özetini portföy entegrasyonu için döndürür.
+
+    Parametreler:
+        tarih: str "YYYY-MM-DD" veya None.
+               None → bugün. Aksi halde verilen tarihteki anlık değer.
+
+    Dönüş: dict
+        {
+            "deger_tl"              : float,   # Son teminat snapshot ≤ tarih
+            "kz_tl"                 : float,   # Açık stratejilerin unrealized P&L toplamı
+            "maliyet_tl"            : float,   # deger_tl - kz_tl (klasik muhasebe)
+            "teminat_tarihi"        : str|None,
+            "uyari"                 : str|None,  # köşe durumları için
+            "acik_strateji_sayisi"  : int,
+            "vadesi_yaklasan_sayisi": int,    # turuncu veya kırmızı
+            "araci_kurum_dagilim"   : {
+                "<broker>": {
+                    "deger_tl"              : float,
+                    "deger_usd"             : float,
+                    "kz_tl"                 : float,
+                    "maliyet_tl"            : float,
+                    "acik_strateji_sayisi"  : int,
+                    "vadesi_yaklasan_sayisi": int,
+                    "stratejiler"           : [strateji_detay_dict, ...],
+                },
+                ...
+            },
+            "kapatilmis_teminat"    : float,  # Aktif strateji yokken duran teminat
+            "var_mi"                : bool,   # Portföye eklenecek bir şey var mı?
+        }
+
+    Hesap mantığı (Aşama 5.4.A onaylandı):
+        - Değer = Son teminat snapshot (aracı kurum bakiyesi olarak)
+        - K/Z = Açık stratejilerin unrealized P&L toplamı (viop_strateji_pnl)
+        - Maliyet = Değer - K/Z (klasik muhasebe ilişkisini korur)
+        - Broker dağılımı = açık stratejilerin acılış teminatına göre orantılı
+        - Hiç açık strateji yok ama teminat var → "kapatilmis_teminat" alanına yazılır
+    """
+    if tarih is None:
+        tarih = date.today().strftime("%Y-%m-%d")
+
+    baglanti = veritabani_baglan()
+
+    # --- 1) Tüm stratejileri ve bacaklarını çek ---
+    stratejiler_df = sql_oku("""
+        SELECT * FROM viop_stratejiler
+        WHERE acilis_tarih <= ?
+    """, baglanti, params=(tarih,))
+
+    # --- 2) Son teminat snapshot (≤ tarih) ---
+    teminat_son_df = sql_oku("""
+        SELECT tarih, teminat_tutari FROM viop_teminat_anlik
+        WHERE tarih <= ?
+        ORDER BY tarih DESC LIMIT 1
+    """, baglanti, params=(tarih,))
+
+    if not teminat_son_df.empty:
+        teminat_tutar  = float(teminat_son_df.iloc[0]["teminat_tutari"])
+        teminat_tarihi = teminat_son_df.iloc[0]["tarih"]
+    else:
+        teminat_tutar  = 0.0
+        teminat_tarihi = None
+
+    # --- 3) Hiç strateji yoksa erken çık ---
+    if stratejiler_df.empty:
+        return {
+            "deger_tl"              : teminat_tutar,
+            "kz_tl"                 : 0.0,
+            "maliyet_tl"            : teminat_tutar,
+            "teminat_tarihi"        : teminat_tarihi,
+            "uyari"                 : None,
+            "acik_strateji_sayisi"  : 0,
+            "vadesi_yaklasan_sayisi": 0,
+            "araci_kurum_dagilim"   : {},
+            "kapatilmis_teminat"    : teminat_tutar,  # tüm teminat "duruyor"
+            "var_mi"                : teminat_tutar > 0,
+        }
+
+    # --- 4) Her strateji için durum + P&L + bacak listesi ---
+    strateji_detay = []  # her açık strateji için ufak özet
+    toplam_acik_pnl    = 0.0
+    toplam_acilis_teminat = 0.0  # broker orantısı için
+    vadesi_yaklasan_toplam = 0
+
+    for _, strat in stratejiler_df.iterrows():
+        strat_id_v = int(strat["id"])
+
+        # Durum (canlı türetilir)
+        durum_v = viop_strateji_durumu(strat_id_v)
+
+        # Sadece açık (veya kısmi açık) stratejileri detaya al
+        if durum_v not in ("Açık", "Kısmi Açık"):
+            continue
+
+        # Unrealized P&L
+        pnl_bilgi_v = viop_strateji_pnl(strat_id_v)
+        pnl_v = pnl_bilgi_v["toplam_pnl"]
+        toplam_acik_pnl += pnl_v
+
+        # Açılış teminatı (orantı için)
+        acilis_tem_v = (float(strat["acilis_teminat"])
+                        if not pd.isna(strat["acilis_teminat"]) else 0.0)
+        toplam_acilis_teminat += acilis_tem_v
+
+        # Broker (aracı kurum) — boşsa "Belirtilmemiş"
+        broker_v = (strat["araci_kurum"]
+                    if not pd.isna(strat["araci_kurum"]) and strat["araci_kurum"]
+                    else "Belirtilmemiş")
+
+        # Stratejinin bacaklarını çek (açık olanları say + en yakın vade için)
+        bacak_str_df = sql_oku(
+            "SELECT * FROM viop_bacaklar WHERE strateji_id = ?",
+            baglanti, params=(strat_id_v,),
+        )
+        acik_bacak_df = (bacak_str_df[bacak_str_df["kapanis_tarih"].isna()]
+                         if not bacak_str_df.empty else pd.DataFrame())
+
+        # En yakın vade ve vadesi yaklaşan kontrolü
+        en_yakin_vade_v = None
+        vadesi_yaklasan_v = False
+        if not acik_bacak_df.empty:
+            vade_listesi_v = acik_bacak_df["vade"].tolist()
+            kalan_listesi_v = [viop_vadeye_kalan_gun(v) for v in vade_listesi_v]
+            min_kalan_v = min(kalan_listesi_v)
+            idx_v = kalan_listesi_v.index(min_kalan_v)
+            en_yakin_vade_v = vade_listesi_v[idx_v]
+
+            for v_v in vade_listesi_v:
+                seviye_v = viop_uyari_seviyesi(v_v)
+                if seviye_v in ("turuncu", "kirmizi"):
+                    vadesi_yaklasan_v = True
+                    break
+
+        if vadesi_yaklasan_v:
+            vadesi_yaklasan_toplam += 1
+
+        strateji_detay.append({
+            "id"             : strat_id_v,
+            "ad"             : strat["ad"],
+            "tipi"           : strat["strateji_tipi"],
+            "broker"         : broker_v,
+            "durum"          : durum_v,
+            "acik_bacak"     : int(len(acik_bacak_df)),
+            "en_yakin_vade"  : en_yakin_vade_v,
+            "vadesi_yaklasan": vadesi_yaklasan_v,
+            "acilis_teminat" : acilis_tem_v,
+            "kz_tl"          : float(pnl_v),
+        })
+
+    acik_strateji_sayisi = len(strateji_detay)
+
+    # --- 5) Köşe durumları ---
+    uyari_mesaji = None
+    if acik_strateji_sayisi > 0 and teminat_tarihi is None:
+        # Strateji var ama teminat snapshot yok
+        uyari_mesaji = ("VIOP teminat snapshot kaydı yok. Değer hesabında "
+                        "sadece unrealized P&L gösteriliyor; teminat eksik. "
+                        "Lütfen 💱 VIOP Fiyat Güncelle sayfasından girin.")
+        # Bu durumda Değer = unrealized P&L, Maliyet = 0
+        deger_tl_son  = toplam_acik_pnl
+        kz_tl_son     = toplam_acik_pnl
+        maliyet_tl_son = 0.0
+    elif acik_strateji_sayisi == 0:
+        # Hiç açık strateji yok ama teminat olabilir
+        deger_tl_son  = teminat_tutar
+        kz_tl_son     = 0.0
+        maliyet_tl_son = teminat_tutar
+    else:
+        # Normal durum: hem strateji hem teminat var
+        deger_tl_son  = teminat_tutar
+        kz_tl_son     = toplam_acik_pnl
+        maliyet_tl_son = teminat_tutar - toplam_acik_pnl
+
+    # --- 6) Broker dağılımı ---
+    araci_kurum_dagilim = {}
+
+    # USD kuru (USD değerleri için)
+    usd_kuru = bugunun_kuru("USD")
+    if usd_kuru <= 0:
+        usd_kuru = 1.0  # bölme hatası önlemek için fallback
+
+    if acik_strateji_sayisi > 0:
+        # Brokere göre grupla
+        for det_s in strateji_detay:
+            br = det_s["broker"]
+            if br not in araci_kurum_dagilim:
+                araci_kurum_dagilim[br] = {
+                    "deger_tl"              : 0.0,
+                    "deger_usd"             : 0.0,
+                    "kz_tl"                 : 0.0,
+                    "maliyet_tl"            : 0.0,
+                    "acik_strateji_sayisi"  : 0,
+                    "vadesi_yaklasan_sayisi": 0,
+                    "stratejiler"           : [],
+                    "_acilis_teminat_toplam": 0.0,  # orantı için, sonra silinir
+                }
+            d = araci_kurum_dagilim[br]
+            d["kz_tl"]                 += det_s["kz_tl"]
+            d["acik_strateji_sayisi"]  += 1
+            if det_s["vadesi_yaklasan"]:
+                d["vadesi_yaklasan_sayisi"] += 1
+            d["_acilis_teminat_toplam"] += det_s["acilis_teminat"]
+            d["stratejiler"].append(det_s)
+
+        # Teminatı brokerlar arasında orantılı dağıt
+        # Eğer toplam acılış teminatı 0 ise (kullanıcı acılış_teminat girmemişse),
+        # eşit dağıt
+        for br, d in araci_kurum_dagilim.items():
+            if toplam_acilis_teminat > 0:
+                pay_orani = d["_acilis_teminat_toplam"] / toplam_acilis_teminat
+            else:
+                pay_orani = 1.0 / len(araci_kurum_dagilim)
+
+            broker_teminat_pay = teminat_tutar * pay_orani
+
+            d["deger_tl"]   = broker_teminat_pay
+            d["maliyet_tl"] = broker_teminat_pay - d["kz_tl"]
+            d["deger_usd"]  = d["deger_tl"] / usd_kuru
+            del d["_acilis_teminat_toplam"]
+
+        # Teminat snapshot yoksa: deger=kz, maliyet=0 (özel durum)
+        if teminat_tarihi is None:
+            for br, d in araci_kurum_dagilim.items():
+                d["deger_tl"]   = d["kz_tl"]
+                d["maliyet_tl"] = 0.0
+                d["deger_usd"]  = d["deger_tl"] / usd_kuru
+
+    # --- 7) Kapatılmış teminat (açık strateji yok ama teminat var) ---
+    # Bu durum yukarıda "acik_strateji_sayisi == 0" dalında zaten yakalandı,
+    # broker dağılımına dahil edilmez, ayrı bir alan olarak döndürülür.
+    if acik_strateji_sayisi == 0:
+        kapatilmis_teminat = teminat_tutar
+    else:
+        kapatilmis_teminat = 0.0
+
+    # --- 8) "Var mı" — portföye yansıyacak bir bilgi olup olmadığı ---
+    var_mi = (acik_strateji_sayisi > 0) or (teminat_tutar > 0)
+
+    return {
+        "deger_tl"              : deger_tl_son,
+        "kz_tl"                 : kz_tl_son,
+        "maliyet_tl"            : maliyet_tl_son,
+        "teminat_tarihi"        : teminat_tarihi,
+        "uyari"                 : uyari_mesaji,
+        "acik_strateji_sayisi"  : acik_strateji_sayisi,
+        "vadesi_yaklasan_sayisi": vadesi_yaklasan_toplam,
+        "araci_kurum_dagilim"   : araci_kurum_dagilim,
+        "kapatilmis_teminat"    : kapatilmis_teminat,
+        "var_mi"                : var_mi,
+    }
+
+
 if __name__ == "__main__":
     print("TWR testi:")
     print("GARAN TWR:", twr_hesapla(1))
