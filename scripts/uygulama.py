@@ -18,7 +18,12 @@ from hesaplamalar import (
     aylik_dagilim_hesapla, AY_ISIMLERI,
     fifo_maliyet_hesapla, MEVDUAT_TURLERI,
     kur_getir, bugunun_kuru,
-    donemsel_karsilastirma_hesapla
+    donemsel_karsilastirma_hesapla,
+    # VIOP modülü (Aşama 4'te eklendi, Aşama 5.1'de UI'da kullanılıyor)
+    viop_uyari_seviyesi, viop_vadeye_kalan_gun,
+    viop_strateji_pnl, viop_strateji_durumu,
+    # VIOP CRUD için (Aşama 5.2'de eklendi)
+    viop_sozlesme_parse, viop_carpan_tahmin,
 )
 from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
@@ -138,9 +143,12 @@ if ADMIN_MOD:
         "📅 Aylık Özet",
         "🔄 Dönemsel Karşılaştırma",
         "🏛️ Yatırım Fonları",
+        "⚡ VIOP Stratejileri",
         "💱 Fiyat Güncelle",
         "➕ Varlık Ekle",
         "✏️ Varlık Düzenle",
+        "➕ VIOP Strateji Ekle",
+        "✏️ VIOP Strateji Düzenle",
         "💰 İşlem Ekle",
         "✏️ İşlem Düzenle",
         "📤 İşlem Yükle",
@@ -155,6 +163,7 @@ else:
         "📅 Aylık Özet",
         "🔄 Dönemsel Karşılaştırma",
         "🏛️ Yatırım Fonları",
+        "⚡ VIOP Stratejileri",
         "📋 İşlem Geçmişi",
     ]
 
@@ -1749,6 +1758,435 @@ elif sayfa == "🏛️ Yatırım Fonları":
                     st.info("Seçilen dönem için yeterli fiyat verisi yok. (En az 2 fiyat kaydı gerekli.)")
 
 # ==========================================
+# SAYFA: VIOP STRATEJİLERİ (Aşama 5.1 — okuma görünümü)
+# ==========================================
+# Üç sekme: Açık / Kapalı / Vadesi Geçmiş
+# Her sekmede strateji-başına bir expander: meta + bacak tablosu.
+# Vade uyarı renkleri: yeşil > 30g, sarı 7-30g, turuncu 0-7g, kırmızı vadesi geçmiş.
+# CRUD işlemleri Aşama 5.2'de eklenecek; bu sayfa şu an SADECE OKUMA.
+elif sayfa == "⚡ VIOP Stratejileri":
+    st.title("⚡ VIOP Stratejileri")
+    st.markdown("---")
+
+    # ==========================================
+    # VERİ HAZIRLAMA
+    # ==========================================
+    baglanti = veritabani_baglan()
+
+    # Tüm stratejileri çek (en yeni açılış başta)
+    stratejiler_df = sql_oku("""
+        SELECT * FROM viop_stratejiler
+        ORDER BY acilis_tarih DESC
+    """, baglanti)
+
+    if stratejiler_df.empty:
+        st.info("Henüz VIOP stratejisi kaydedilmemiş. Yeni strateji ekleme Aşama 5.2'de eklenecek.")
+    else:
+        # Tüm bacakları tek sorguyla al, strateji_id'ye göre Python tarafında ayır
+        bacaklar_df = sql_oku("SELECT * FROM viop_bacaklar", baglanti)
+
+        # --- Yardımcı: vade uyarı seviyesi → emoji / arka plan rengi ---
+        def vade_seviyesi_emoji(seviye):
+            return {
+                "normal" : "🟢",
+                "sari"   : "🟡",
+                "turuncu": "🟠",
+                "kirmizi": "🔴",
+            }.get(seviye, "🟢")
+
+        def vade_seviyesi_renk(seviye):
+            # Yatırım Fonları sayfasındaki sarı/kırmızı paletiyle uyumlu
+            return {
+                "normal" : "",
+                "sari"   : "#FFF9C4",
+                "turuncu": "#FFD8B5",  # açık turuncu — sarı ile kırmızı arası
+                "kirmizi": "#FFE0E0",
+            }.get(seviye, "")
+
+        # --- Her strateji için durum, P&L ve kategori (Açık/Kapalı/Vadesi Geçmiş) hesapla ---
+        strateji_meta = []
+        for _, strat in stratejiler_df.iterrows():
+            strat_id = int(strat["id"])
+
+            # Durum (canlı türetilir — viop_stratejiler.durum alanı UI cache'i, doğru kaynak bu)
+            durum = viop_strateji_durumu(strat_id)
+
+            # Toplam P&L
+            pnl_bilgi = viop_strateji_pnl(strat_id)
+
+            # Stratejiye ait bacaklar (lokal filtre)
+            strat_bacaklar = bacaklar_df[bacaklar_df["strateji_id"] == strat_id].copy() \
+                if not bacaklar_df.empty else pd.DataFrame()
+
+            # Açık bacaklar (kapanis_tarih NULL/NaN olanlar)
+            if not strat_bacaklar.empty:
+                acik_bacaklar = strat_bacaklar[strat_bacaklar["kapanis_tarih"].isna()].copy()
+            else:
+                acik_bacaklar = pd.DataFrame()
+
+            # En yakın vade (açık bacaklardan); aynı zamanda tüm açık bacakların
+            # vadesi geçmiş mi diye kontrol et (3. sekme kategorizasyonu için)
+            en_yakin_vade   = None
+            min_kalan_gun   = None
+            tum_vadeler_gecmis = False
+
+            if not acik_bacaklar.empty:
+                vade_listesi = acik_bacaklar["vade"].tolist()
+                kalan_listesi = [viop_vadeye_kalan_gun(v) for v in vade_listesi]
+                # En küçük (negatif olabilir) kalan gün
+                min_kalan_gun = min(kalan_listesi)
+                # En yakın vadeyi al (en küçük "kalan"a karşılık gelen vade tarihi)
+                idx = kalan_listesi.index(min_kalan_gun)
+                en_yakin_vade = vade_listesi[idx]
+                # Tüm açık bacakların vadesi geçmiş mi?
+                tum_vadeler_gecmis = all(k < 0 for k in kalan_listesi)
+
+            # Sekme kategorisi — Aşama 5.1'de UI tarafında lambda mantığıyla:
+            #   "acik"          : Açık veya Kısmi Açık, en az bir bacağın vadesi gelmedi
+            #   "kapali"        : Tüm bacaklar kapanmış (durum == "Kapalı")
+            #   "vadesi_gecmis" : Açık bacak var AMA hepsinin vadesi geçmiş
+            #                     (yani kullanıcı henüz kapanış kaydını girmemiş)
+            #   "kapali" (uç)   : Bacak Yok — boş strateji, kapalı kategorisine düşer
+            if durum == "Kapalı" or durum == "Bacak Yok":
+                kategori = "kapali"
+            elif durum in ("Açık", "Kısmi Açık"):
+                if not acik_bacaklar.empty and tum_vadeler_gecmis:
+                    kategori = "vadesi_gecmis"
+                else:
+                    kategori = "acik"
+            else:
+                kategori = "kapali"
+
+            strateji_meta.append({
+                "strat"            : strat,
+                "durum"            : durum,
+                "pnl_bilgi"        : pnl_bilgi,
+                "kategori"         : kategori,
+                "bacaklar"         : strat_bacaklar,
+                "acik_bacaklar"    : acik_bacaklar,
+                "en_yakin_vade"    : en_yakin_vade,
+                "min_kalan_gun"    : min_kalan_gun,
+            })
+
+        # Kategorilere göre ayır (orijinal sıra korunur: en yeni açılış başta)
+        acik_listesi          = [m for m in strateji_meta if m["kategori"] == "acik"]
+        kapali_listesi        = [m for m in strateji_meta if m["kategori"] == "kapali"]
+        vadesi_gecmis_listesi = [m for m in strateji_meta if m["kategori"] == "vadesi_gecmis"]
+
+        # ==========================================
+        # 1) ÜST METRİK KARTLARI (4 adet)
+        # ==========================================
+        n_acik = len(acik_listesi)
+
+        # Toplam Açık P&L: sadece "Açık" kategorisindeki stratejilerin anlık P&L toplamı
+        toplam_acik_pnl = sum(m["pnl_bilgi"]["toplam_pnl"] for m in acik_listesi)
+
+        # Açık Teminat: viop_teminat_anlik tablosundan son snapshot (MAX(tarih))
+        teminat_son_df = sql_oku("""
+            SELECT teminat_tutari FROM viop_teminat_anlik
+            ORDER BY tarih DESC LIMIT 1
+        """, baglanti)
+        if not teminat_son_df.empty:
+            acik_teminat = float(teminat_son_df.iloc[0]["teminat_tutari"])
+        else:
+            acik_teminat = 0.0
+
+        # Vadesi Yaklaşan: Açık kategorisindeki stratejilerden, en az bir bacağı
+        # turuncu (0-7 gün) veya kırmızı (geçmiş) olanların sayısı
+        vadesi_yaklasan = 0
+        for m in acik_listesi:
+            yaklasan = False
+            for _, b in m["acik_bacaklar"].iterrows():
+                seviye = viop_uyari_seviyesi(b["vade"])
+                if seviye in ("turuncu", "kirmizi"):
+                    yaklasan = True
+                    break
+            if yaklasan:
+                vadesi_yaklasan += 1
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("🟢 Açık Strateji", f"{n_acik}")
+        mc2.metric("💰 Toplam Açık P&L (TL)", f"{toplam_acik_pnl:+,.0f} TL")
+        mc3.metric("🔒 Açık Teminat (TL)", f"{acik_teminat:,.0f} TL")
+        mc4.metric("⏰ Vadesi Yaklaşan", f"{vadesi_yaklasan} (≤7 gün)")
+
+        # ==========================================
+        # 2) VADE UYARILARI BANNER'I
+        # ==========================================
+        # Hem "acik" hem "vadesi_gecmis" kategorisindeki tüm açık bacakları tara
+        uyari_mesajlari = []
+        for m in acik_listesi + vadesi_gecmis_listesi:
+            for _, b in m["acik_bacaklar"].iterrows():
+                seviye = viop_uyari_seviyesi(b["vade"])
+                kalan  = viop_vadeye_kalan_gun(b["vade"])
+
+                if seviye == "turuncu":
+                    emoji  = "🟠"
+                    metin  = f"{kalan} gün kaldı" if kalan > 0 else "bugün vade"
+                elif seviye == "kirmizi":
+                    emoji  = "🔴"
+                    metin  = f"vadesi {abs(kalan)} gün önce geçti"
+                else:
+                    continue  # sarı ve normal — banner'a girmesin (uzar)
+
+                uyari_mesajlari.append(
+                    f"{emoji} **{m['strat']['ad']}** — `{b['sozlesme_kodu']}` ({metin})"
+                )
+
+        if uyari_mesajlari:
+            st.warning("⚠️ Vade uyarıları:\n\n" + "\n\n".join(uyari_mesajlari))
+
+        st.markdown("---")
+
+        # ==========================================
+        # 3) ÜÇ SEKME: AÇIK / KAPALI / VADESİ GEÇMİŞ
+        # ==========================================
+        tab_acik, tab_kapali, tab_vadesi = st.tabs([
+            f"🟢 Açık ({len(acik_listesi)})",
+            f"⚪ Kapalı ({len(kapali_listesi)})",
+            f"🔴 Vadesi Geçmiş ({len(vadesi_gecmis_listesi)})",
+        ])
+
+        # --- Yardımcı: Bir strateji için tam expander render eder ---
+        def strateji_expander_render(m, sekme_tipi):
+            """
+            Bir strateji için expander açar, meta bilgisini ve bacak tablosunu çizer.
+            sekme_tipi: "acik" / "kapali" / "vadesi_gecmis" (başlık formatlamasını etkiler)
+            """
+            strat     = m["strat"]
+            pnl_bilgi = m["pnl_bilgi"]
+            bacak_df  = m["bacaklar"]
+            pnl       = pnl_bilgi["toplam_pnl"]
+            ad        = strat["ad"]
+
+            # --- Expander başlığını hazırla ---
+            if sekme_tipi == "kapali":
+                # Kapalı stratejide vade bilgisi anlamsız, kapanış tarihini göster
+                if not pd.isna(strat["kapanis_tarih"]):
+                    kapanis_str = strat["kapanis_tarih"]
+                else:
+                    # Kapanış stratejide null ama bacaklar kapanmış olabilir;
+                    # bacaklardan en son kapanış tarihini al
+                    if not bacak_df.empty and not bacak_df["kapanis_tarih"].isna().all():
+                        kapanis_str = bacak_df["kapanis_tarih"].dropna().max()
+                    else:
+                        kapanis_str = "—"
+                baslik = f"⚪ {ad}  |  P&L: {pnl:+,.0f} TL  |  Kapanış: {kapanis_str}"
+
+            else:
+                # Açık veya Vadesi Geçmiş — en yakın vade ve uyarı emojisi
+                if m["en_yakin_vade"]:
+                    seviye = viop_uyari_seviyesi(m["en_yakin_vade"])
+                    emoji  = vade_seviyesi_emoji(seviye)
+                    kalan  = m["min_kalan_gun"]
+                    if kalan is None:
+                        kalan_metin = ""
+                    elif kalan < 0:
+                        kalan_metin = f"vadesi {abs(kalan)} gün önce geçti"
+                    elif kalan == 0:
+                        kalan_metin = "bugün vade"
+                    else:
+                        kalan_metin = f"{kalan} gün"
+                    baslik = (f"{emoji} {ad}  |  P&L: {pnl:+,.0f} TL  |  "
+                              f"Vade: {m['en_yakin_vade']} ({kalan_metin})")
+                else:
+                    # Açık bacak yok ama "acik" kategorisinde — çok nadir durum
+                    baslik = f"⚪ {ad}  |  P&L: {pnl:+,.0f} TL"
+
+            with st.expander(baslik):
+                # ==========================================
+                # BLOK A — Strateji Meta Bilgisi
+                # ==========================================
+                strateji_tipi   = strat["strateji_tipi"]   if not pd.isna(strat["strateji_tipi"])   else "—"
+                dayanak         = strat["dayanak"]         if not pd.isna(strat["dayanak"])         else "—"
+                araci_kurum     = strat["araci_kurum"]     if not pd.isna(strat["araci_kurum"])     else "—"
+                portfoy_etiketi = strat["portfoy_etiketi"] if not pd.isna(strat["portfoy_etiketi"]) else "—"
+                acilis_tarih    = strat["acilis_tarih"]
+                aciklama        = strat["aciklama"]        if not pd.isna(strat["aciklama"])        else ""
+
+                acilis_teminat = strat["acilis_teminat"]
+                if pd.isna(acilis_teminat) or acilis_teminat is None:
+                    teminat_str = "—"
+                else:
+                    teminat_str = f"{float(acilis_teminat):,.0f} TL"
+
+                st.markdown(
+                    f"**Strateji Tipi:** {strateji_tipi}  |  "
+                    f"**Dayanak:** {dayanak}  |  "
+                    f"**Durum:** {m['durum']}\n\n"
+                    f"**Aracı Kurum:** {araci_kurum}  |  "
+                    f"**Portföy Etiketi:** {portfoy_etiketi}\n\n"
+                    f"**Açılış Teminatı:** {teminat_str}  |  "
+                    f"**Açılış Tarihi:** {acilis_tarih}"
+                )
+
+                if aciklama:
+                    st.markdown(f"*Açıklama:* {aciklama}")
+
+                # ==========================================
+                # BLOK B — Bacak Tablosu
+                # ==========================================
+                st.markdown("##### Bacaklar")
+
+                if bacak_df.empty:
+                    st.warning("Bu stratejinin henüz bacağı yok.")
+                    return  # tablo render etmeye gerek yok
+
+                # Sıralama: önce vade artan, eşit vadelerde strike artan
+                # (Strike NaN olan future kontratları sona düşer)
+                bacaklar_sirali = bacak_df.sort_values(
+                    by=["vade", "strike"],
+                    ascending=[True, True],
+                    na_position="last",
+                ).reset_index(drop=True)
+
+                # P&L detaylarını bacak_id bazında map'le (hesaplamalar.viop_strateji_pnl'den)
+                pnl_map = {d["bacak_id"]: d for d in pnl_bilgi["detaylar"]}
+
+                # Tablo satırlarını ve her satırın arka plan rengini hazırla
+                satirlar = []
+                renkler  = []
+
+                for _, b in bacaklar_sirali.iterrows():
+                    bacak_id  = int(b["id"])
+                    pnl_detay = pnl_map.get(bacak_id)
+
+                    # Opsiyon / Future ayrımı (strike, tip future için boş)
+                    if b["enstruman_tipi"] == "Opsiyon":
+                        tip = b["opsiyon_tipi"] if not pd.isna(b["opsiyon_tipi"]) else "—"
+                        if not pd.isna(b["strike"]):
+                            strike = f"{float(b['strike']):,.2f}"
+                        else:
+                            strike = "—"
+                    else:
+                        tip    = "—"
+                        strike = "—"
+
+                    # Bacak kapanış kontrolü (NaN/None — libsql NULL'u NaN'a çevirir)
+                    kapanis_fiyat = b["kapanis_fiyat"]
+                    kapanis_tarih = b["kapanis_tarih"]
+                    bacak_kapali  = not (kapanis_fiyat is None or pd.isna(kapanis_fiyat))
+
+                    # Güncel fiyat ve durum metni
+                    if bacak_kapali:
+                        guncel_fiyat = float(kapanis_fiyat)
+                        kt_metin     = kapanis_tarih if not pd.isna(kapanis_tarih) else "—"
+                        durum_str    = f"⚪ Kapalı ({kt_metin})"
+                    elif pnl_detay is not None:
+                        guncel_fiyat = pnl_detay["guncel_fiyat"]
+                        durum_str    = "🟢 Açık"
+                    else:
+                        guncel_fiyat = None
+                        durum_str    = "🟡 Açık (fiyat yok)"
+
+                    # P&L gösterimi
+                    if pnl_detay is not None:
+                        pnl_str = f"{pnl_detay['pnl']:+,.0f}"
+                    else:
+                        pnl_str = "—"
+
+                    # Vade uyarı seviyesi — kapalı bacakta renk yok
+                    if bacak_kapali:
+                        renk = ""
+                    else:
+                        seviye = viop_uyari_seviyesi(b["vade"])
+                        renk = vade_seviyesi_renk(seviye)
+
+                    satirlar.append({
+                        "Sözleşme Kodu" : b["sozlesme_kodu"],
+                        "Tip"           : tip,
+                        "Strike"        : strike,
+                        "Vade"          : b["vade"],
+                        "Yön"           : b["yon"],
+                        "Adet"          : int(b["adet"]),
+                        "Çarpan"        : f"{float(b['kontrat_carpani']):.1f}",
+                        "Açılış Fiyatı" : f"{float(b['acilis_fiyat']):,.2f}",
+                        "Güncel/Kapanış": f"{guncel_fiyat:,.2f}" if guncel_fiyat is not None else "—",
+                        "P&L (TL)"      : pnl_str,
+                        "Durum"         : durum_str,
+                    })
+                    renkler.append(renk)
+
+                bacak_tablo = pd.DataFrame(satirlar)
+
+                # Renklendirme fonksiyonu — index sırasıyla 'renkler' listesine bakar
+                def _renkli_satir(row):
+                    idx = int(row.name)
+                    if 0 <= idx < len(renkler) and renkler[idx]:
+                        return [f"background-color: {renkler[idx]}"] * len(row)
+                    return [""] * len(row)
+
+                st.dataframe(
+                    bacak_tablo.style.apply(_renkli_satir, axis=1),
+                    use_container_width=True, hide_index=True
+                )
+
+                # --- Eksik fiyat uyarısı ---
+                # viop_strateji_pnl, hiç fiyat girilmemiş bacakları "eksik_fiyat" listesinde
+                # döner; bunlar P&L hesabına dahil edilmemiştir.
+                if pnl_bilgi["eksik_fiyat"]:
+                    eksik_ids = pnl_bilgi["eksik_fiyat"]
+                    eksik_kodlar = bacak_df[bacak_df["id"].isin(eksik_ids)]["sozlesme_kodu"].tolist()
+                    st.info(
+                        "ℹ️ Şu bacakların güncel fiyatı yok; P&L hesabına dahil edilmediler:\n\n"
+                        + "\n".join(f"• `{k}`" for k in eksik_kodlar)
+                    )
+
+        # --- Sekme içerikleri ---
+        with tab_acik:
+            if not acik_listesi:
+                st.info("Bu kategoride strateji bulunmuyor.")
+            else:
+                for m in acik_listesi:
+                    strateji_expander_render(m, "acik")
+
+        with tab_kapali:
+            if not kapali_listesi:
+                st.info("Bu kategoride strateji bulunmuyor.")
+            else:
+                for m in kapali_listesi:
+                    strateji_expander_render(m, "kapali")
+
+        with tab_vadesi:
+            if not vadesi_gecmis_listesi:
+                st.info("Bu kategoride strateji bulunmuyor.")
+            else:
+                # Bu sekmede expander'ları açıkken render etmek istersek burada
+                # st.expander'a expanded=True verebiliriz — şimdilik default kapalı.
+                for m in vadesi_gecmis_listesi:
+                    strateji_expander_render(m, "vadesi_gecmis")
+
+        # ==========================================
+        # 4) TEMİNAT SNAPSHOT KARTI (Sayfa Sonu)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🔒 Teminat Geçmişi")
+
+        teminat_gecmis_df = sql_oku("""
+            SELECT tarih, teminat_tutari, aciklama
+            FROM viop_teminat_anlik
+            ORDER BY tarih DESC LIMIT 10
+        """, baglanti)
+
+        if teminat_gecmis_df.empty:
+            st.info("Henüz teminat snapshot'ı kaydedilmemiş. "
+                    "Veri girişi Aşama 5.3'te eklenecek.")
+        else:
+            # NaN açıklamaları "—" ile değiştir
+            teminat_gecmis_df["aciklama"] = teminat_gecmis_df["aciklama"].fillna("—")
+
+            st.dataframe(
+                teminat_gecmis_df.rename(columns={
+                    "tarih"          : "Tarih",
+                    "teminat_tutari" : "Tutar (TL)",
+                    "aciklama"       : "Açıklama",
+                }).style.format({
+                    "Tutar (TL)": "{:,.0f}",
+                }),
+                use_container_width=True, hide_index=True
+            )
+
+# ==========================================
 # SAYFA 4: VARLIK EKLE
 # ==========================================
 elif sayfa == "➕ Varlık Ekle":
@@ -1878,6 +2316,1307 @@ elif sayfa == "✏️ Varlık Düzenle":
                 st.success(f"✅ {mevcut['kod']} silindi!")
                 import time
                 time.sleep(1)
+                st.rerun()
+
+# ==========================================
+# SAYFA: VIOP STRATEJİ EKLE (Aşama 5.2 — CRUD)
+# ==========================================
+# Yeni VIOP stratejisi ekleme formu.
+# - Üst bölüm: strateji meta bilgisi
+# - Alt bölüm: dinamik bacak slotları (default 4, ekle/kaldır butonlarıyla genişler)
+# - Her bacakta "🔍 Parse Et" ile sözleşme kodundan otomatik alan doldurma
+# - Çarpan VIOP_CARPAN_VARSAYILAN sözlüğünden otomatik tahmin edilir
+# - Kayıt: viop_stratejiler + viop_bacaklar tablolarına INSERT
+elif sayfa == "➕ VIOP Strateji Ekle":
+    st.title("➕ Yeni VIOP Stratejisi")
+    st.markdown("---")
+
+    from datetime import datetime as _dt_viop_ekle
+
+    # --- Session state init ---
+    # Slot sayısı dinamik — kullanıcı buton ile ekleyip kaldırabilir
+    if "viop_ekle_slot_sayisi" not in st.session_state:
+        st.session_state.viop_ekle_slot_sayisi = 4
+
+    # Strateji tipleri listesi (Aşama 5.2'de kararlaştırıldı)
+    VIOP_STRATEJI_TIPLERI = [
+        "Short Strangle", "Long Strangle",
+        "Short Straddle", "Long Straddle",
+        "Naked Call", "Naked Put", "Covered Call",
+        "Long Future", "Short Future",
+        "Bull Call Spread", "Bear Put Spread",
+        "Iron Condor", "Iron Butterfly",
+        "Diğer",
+    ]
+
+    # ==========================================
+    # BÖLÜM 1: STRATEJİ BİLGİLERİ
+    # ==========================================
+    st.subheader("Strateji Bilgileri")
+
+    col_s1, col_s2 = st.columns(2)
+
+    with col_s1:
+        s_ad = st.text_input(
+            "Strateji Adı *",
+            placeholder="Örn: Short Strangle XU030 Temmuz",
+            key="viop_ekle_ad",
+        )
+        s_tipi = st.selectbox(
+            "Strateji Tipi *",
+            VIOP_STRATEJI_TIPLERI,
+            key="viop_ekle_tipi",
+        )
+        s_dayanak = st.text_input(
+            "Dayanak *",
+            placeholder="Örn: XU030, GARAN, USDTRY",
+            key="viop_ekle_dayanak",
+        )
+        s_acilis_tarih = st.date_input(
+            "Açılış Tarihi",
+            value=date.today(),
+            key="viop_ekle_acilis_tarih",
+        )
+        s_acilis_teminat = st.number_input(
+            "Açılış Teminatı (TL)",
+            min_value=0.0, value=0.0, step=100.0,
+            key="viop_ekle_teminat",
+            help="Bu strateji için ayrılan teminat (opsiyonel)",
+        )
+
+    with col_s2:
+        # Aracı kurum dropdown'u — mevcut listeden
+        ak_listesi = araci_kurum_listesi()
+        s_araci_kurum = st.selectbox(
+            "Aracı Kurum",
+            ak_listesi,
+            key="viop_ekle_araci_kurum",
+        )
+
+        # Portföy etiketi
+        pe_listesi = portfoy_etiketi_listesi()
+        s_portfoy_etiketi = st.selectbox(
+            "Portföy Etiketi",
+            pe_listesi,
+            key="viop_ekle_portfoy_etiketi",
+        )
+
+        # Bağlı varlık (gerçek covered call için — spot hisseye referans)
+        varliklar_df = sql_oku(
+            "SELECT id, kod, ad FROM varliklar ORDER BY kod",
+            veritabani_baglan(),
+        )
+        if not varliklar_df.empty:
+            varlik_secenekleri = ["(yok)"] + [
+                f"{r['kod']} — {r['ad']}" for _, r in varliklar_df.iterrows()
+            ]
+            varlik_id_map = {
+                f"{r['kod']} — {r['ad']}": int(r["id"])
+                for _, r in varliklar_df.iterrows()
+            }
+        else:
+            varlik_secenekleri = ["(yok)"]
+            varlik_id_map = {}
+
+        s_bagli_varlik_secim = st.selectbox(
+            "Bağlı Varlık (Covered Call için)",
+            varlik_secenekleri,
+            key="viop_ekle_bagli_varlik",
+            help="Gerçek Covered Call'da spot hisseye referans. Diğer stratejilerde boş bırakın.",
+        )
+
+    s_aciklama = st.text_area(
+        "Açıklama",
+        placeholder="Opsiyonel notlar (strateji mantığı, hedef vb.)",
+        key="viop_ekle_aciklama",
+        height=70,
+    )
+
+    # ==========================================
+    # BÖLÜM 2: BACAKLAR (DİNAMİK SLOT YAPISI)
+    # ==========================================
+    st.markdown("---")
+    st.subheader("Bacaklar")
+    st.caption(
+        "Sözleşme kodunu yazıp **🔍 Parse Et** butonuna basın — alanlar otomatik dolar, sonra düzeltebilirsiniz. "
+        "Boş bırakılan slotlar kaydedilmez."
+    )
+
+    bacak_verileri = []  # tüm slotların değerlerini topla
+
+    for i in range(st.session_state.viop_ekle_slot_sayisi):
+        slot_no = i + 1
+        # İlk slot default açık, diğerleri kapalı
+        expanded = (slot_no == 1)
+
+        # Slot'un parse sonucunu session_state'ten al
+        parse_key = f"viop_ekle_parse_{slot_no}"
+        parse_data = st.session_state.get(parse_key, {})
+
+        # Slot başlığı: sözleşme kodu girilmişse onu göster, yoksa "Bacak N"
+        sk_key = f"viop_ekle_sk_{slot_no}"
+        mevcut_kod = st.session_state.get(sk_key, "")
+        if mevcut_kod:
+            slot_baslik = f"📋 Bacak {slot_no} — {mevcut_kod}"
+        else:
+            slot_baslik = f"📋 Bacak {slot_no} (boş)"
+
+        with st.expander(slot_baslik, expanded=expanded):
+            # --- Sözleşme kodu + Parse Et butonu ---
+            col_kod, col_parse = st.columns([4, 1])
+
+            with col_kod:
+                sozlesme_kodu = st.text_input(
+                    "Sözleşme Kodu",
+                    key=sk_key,
+                    placeholder="Örn: O_XU030E0826C18000.00  veya  F_GARAN0826",
+                )
+
+            with col_parse:
+                # Boşluk için spacer
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("🔍 Parse Et", key=f"viop_ekle_parse_btn_{slot_no}"):
+                    if not sozlesme_kodu.strip():
+                        st.warning("Önce sözleşme kodu girin.")
+                    else:
+                        parse_sonuc = viop_sozlesme_parse(sozlesme_kodu)
+                        if parse_sonuc is None:
+                            st.error(
+                                f"❌ Sözleşme kodu tanınmadı: `{sozlesme_kodu}`\n\n"
+                                "Beklenen format:\n"
+                                "- Opsiyon: `O_<DAYANAK>E<AAYY>C<STRIKE>` (örn `O_XU030E0826C18000.00`)\n"
+                                "- Future: `F_<DAYANAK><AAYY>` (örn `F_GARAN0826`)"
+                            )
+                        else:
+                            # Çarpan tahmini de ekle
+                            parse_sonuc["carpan"] = viop_carpan_tahmin(parse_sonuc["dayanak"])
+                            st.session_state[parse_key] = parse_sonuc
+
+                            # KRİTİK: Widget key'lerini DOĞRUDAN güncelle.
+                            # Streamlit'te key'li widget'lar `index=` parametresine değil,
+                            # `session_state[key]` değerine bakar (ilk render hariç). Bu yüzden
+                            # rerun öncesi widget key'lerini elle set etmek şart.
+                            st.session_state[f"viop_ekle_ens_tipi_{slot_no}"] = parse_sonuc["enstruman_tipi"]
+                            if parse_sonuc.get("opsiyon_tipi"):
+                                st.session_state[f"viop_ekle_opt_tipi_{slot_no}"] = parse_sonuc["opsiyon_tipi"]
+                            if parse_sonuc.get("strike") is not None:
+                                st.session_state[f"viop_ekle_strike_{slot_no}"] = float(parse_sonuc["strike"])
+                            if parse_sonuc.get("vade"):
+                                try:
+                                    st.session_state[f"viop_ekle_vade_{slot_no}"] = \
+                                        _dt_viop_ekle.strptime(parse_sonuc["vade"], "%Y-%m-%d").date()
+                                except ValueError:
+                                    pass
+                            st.session_state[f"viop_ekle_carpan_{slot_no}"] = float(parse_sonuc["carpan"])
+
+                            st.rerun()  # form alanları doldurulsun diye yenile
+
+            # --- Enstrüman tipi / Opsiyon tipi / Strike ---
+            col_a, col_b, col_c = st.columns(3)
+
+            with col_a:
+                ens_default = parse_data.get("enstruman_tipi", "Opsiyon")
+                ens_tipi = st.selectbox(
+                    "Enstrüman Tipi",
+                    ["Opsiyon", "Future"],
+                    index=0 if ens_default == "Opsiyon" else 1,
+                    key=f"viop_ekle_ens_tipi_{slot_no}",
+                )
+
+            with col_b:
+                if ens_tipi == "Opsiyon":
+                    opt_default = parse_data.get("opsiyon_tipi", "Call") or "Call"
+                    opt_tipi = st.selectbox(
+                        "Opsiyon Tipi",
+                        ["Call", "Put"],
+                        index=0 if opt_default == "Call" else 1,
+                        key=f"viop_ekle_opt_tipi_{slot_no}",
+                    )
+                else:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    st.text("— (future)")
+                    opt_tipi = None
+
+            with col_c:
+                if ens_tipi == "Opsiyon":
+                    strike_default = parse_data.get("strike") or 0.0
+                    strike = st.number_input(
+                        "Strike",
+                        min_value=0.0,
+                        value=float(strike_default),
+                        step=100.0,
+                        format="%.2f",
+                        key=f"viop_ekle_strike_{slot_no}",
+                    )
+                else:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    st.text("— (future)")
+                    strike = None
+
+            # --- Vade / Yön / Adet ---
+            col_d, col_e, col_f = st.columns(3)
+
+            with col_d:
+                vade_default_str = parse_data.get("vade", "")
+                if vade_default_str:
+                    try:
+                        vade_dt = _dt_viop_ekle.strptime(vade_default_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        vade_dt = date.today() + timedelta(days=30)
+                else:
+                    vade_dt = date.today() + timedelta(days=30)
+
+                vade = st.date_input(
+                    "Vade",
+                    value=vade_dt,
+                    key=f"viop_ekle_vade_{slot_no}",
+                )
+
+            with col_e:
+                yon = st.selectbox(
+                    "Yön",
+                    ["Long", "Short"],
+                    key=f"viop_ekle_yon_{slot_no}",
+                )
+
+            with col_f:
+                adet = st.number_input(
+                    "Adet",
+                    min_value=1, value=1, step=1,
+                    key=f"viop_ekle_adet_{slot_no}",
+                )
+
+            # --- Çarpan + Açılış Fiyatı ---
+            col_g, col_h = st.columns(2)
+
+            with col_g:
+                carpan_default = float(parse_data.get("carpan", 100.0))
+                carpan = st.number_input(
+                    "Kontrat Çarpanı",
+                    min_value=0.01,
+                    value=carpan_default,
+                    step=10.0,
+                    key=f"viop_ekle_carpan_{slot_no}",
+                    help="XU030: 10, Döviz future: 1000, Hisse opsiyon: 100 (otomatik tahmin)",
+                )
+
+            with col_h:
+                acilis_fiyat = st.number_input(
+                    "Açılış Fiyatı",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                    key=f"viop_ekle_acilis_fiyat_{slot_no}",
+                )
+
+            # Slot verisini topla — bacak_dayanagi parse'tan veya strateji dayanağından
+            bacak_dayanagi = parse_data.get("dayanak") or s_dayanak
+
+            bacak_verileri.append({
+                "slot_no"        : slot_no,
+                "sozlesme_kodu"  : sozlesme_kodu.strip() if sozlesme_kodu else "",
+                "enstruman_tipi" : ens_tipi,
+                "dayanak"        : bacak_dayanagi.upper() if bacak_dayanagi else "",
+                "opsiyon_tipi"   : opt_tipi,
+                "strike"         : strike,
+                "vade"           : vade.strftime("%Y-%m-%d"),
+                "yon"            : yon,
+                "adet"           : int(adet),
+                "carpan"         : float(carpan),
+                "acilis_fiyat"   : float(acilis_fiyat),
+            })
+
+    # --- Slot ekle / kaldır butonları ---
+    col_slot_ekle, col_slot_kaldir, _ = st.columns([1, 1, 3])
+
+    with col_slot_ekle:
+        if st.button("➕ Yeni Bacak Slotu Ekle"):
+            st.session_state.viop_ekle_slot_sayisi += 1
+            st.rerun()
+
+    with col_slot_kaldir:
+        if st.session_state.viop_ekle_slot_sayisi > 1:
+            if st.button("➖ Son Slotu Kaldır"):
+                son_slot = st.session_state.viop_ekle_slot_sayisi
+                # Son slot'a ait tüm session state anahtarlarını temizle
+                slot_anahtarlari = [
+                    f"viop_ekle_sk_{son_slot}",
+                    f"viop_ekle_parse_{son_slot}",
+                    f"viop_ekle_ens_tipi_{son_slot}",
+                    f"viop_ekle_opt_tipi_{son_slot}",
+                    f"viop_ekle_strike_{son_slot}",
+                    f"viop_ekle_vade_{son_slot}",
+                    f"viop_ekle_yon_{son_slot}",
+                    f"viop_ekle_adet_{son_slot}",
+                    f"viop_ekle_carpan_{son_slot}",
+                    f"viop_ekle_acilis_fiyat_{son_slot}",
+                ]
+                for k in slot_anahtarlari:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.session_state.viop_ekle_slot_sayisi -= 1
+                st.rerun()
+
+    # ==========================================
+    # BÖLÜM 3: VALIDATION + KAYDET
+    # ==========================================
+    st.markdown("---")
+
+    if st.button("💾 Stratejiyi Kaydet", type="primary"):
+        hatalar = []
+
+        # --- Strateji seviyesi validation ---
+        if not s_ad or len(s_ad.strip()) < 3:
+            hatalar.append("Strateji adı en az 3 karakter olmalı.")
+        if not s_dayanak or not s_dayanak.strip():
+            hatalar.append("Dayanak boş olamaz.")
+
+        # --- Dolu bacakları filtrele ---
+        dolu_bacaklar = [b for b in bacak_verileri if b["sozlesme_kodu"]]
+
+        if not dolu_bacaklar:
+            hatalar.append("En az 1 bacak girilmeli (sözleşme kodu dolu olmalı).")
+
+        # --- Her dolu bacak için validation ---
+        for b in dolu_bacaklar:
+            slot = b["slot_no"]
+            if b["enstruman_tipi"] == "Opsiyon":
+                if not b["opsiyon_tipi"]:
+                    hatalar.append(f"Bacak {slot}: Opsiyon tipi seçilmeli.")
+                if b["strike"] is None or b["strike"] <= 0:
+                    hatalar.append(f"Bacak {slot}: Strike pozitif olmalı.")
+            if b["adet"] < 1:
+                hatalar.append(f"Bacak {slot}: Adet ≥ 1 olmalı.")
+            if b["carpan"] <= 0:
+                hatalar.append(f"Bacak {slot}: Çarpan > 0 olmalı.")
+            if b["acilis_fiyat"] < 0:
+                hatalar.append(f"Bacak {slot}: Açılış fiyatı negatif olamaz.")
+            # Vade > açılış tarihi mi?
+            try:
+                vade_dt = _dt_viop_ekle.strptime(b["vade"], "%Y-%m-%d").date()
+                if vade_dt < s_acilis_tarih:
+                    hatalar.append(f"Bacak {slot}: Vade, açılış tarihinden önce olamaz.")
+            except ValueError:
+                hatalar.append(f"Bacak {slot}: Vade tarihi geçersiz.")
+
+        # --- Hata varsa göster, yoksa kaydet ---
+        if hatalar:
+            for h in hatalar:
+                st.error(f"❌ {h}")
+        else:
+            # Turso stream timeout fix
+            import db as _db_modul
+            _db_modul._baglanti = None
+            baglanti = veritabani_baglan()
+            cursor   = baglanti.cursor()
+
+            # Bağlı varlık id'si (covered call için)
+            bagli_varlik_id = varlik_id_map.get(s_bagli_varlik_secim)  # None ise (yok)
+
+            # --- Strateji INSERT ---
+            cursor.execute("""
+                INSERT INTO viop_stratejiler
+                (ad, strateji_tipi, dayanak, acilis_tarih, durum, bagli_varlik_id,
+                 acilis_teminat, araci_kurum, portfoy_etiketi, aciklama)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                s_ad.strip(),
+                s_tipi,
+                s_dayanak.strip().upper(),
+                s_acilis_tarih.strftime("%Y-%m-%d"),
+                "Açık",
+                bagli_varlik_id,
+                s_acilis_teminat if s_acilis_teminat > 0 else None,
+                s_araci_kurum if s_araci_kurum else None,
+                s_portfoy_etiketi if s_portfoy_etiketi else None,
+                s_aciklama.strip() if s_aciklama else None,
+            ))
+            yeni_strat_id = cursor.lastrowid
+
+            # --- Bacaklar INSERT ---
+            for b in dolu_bacaklar:
+                cursor.execute("""
+                    INSERT INTO viop_bacaklar
+                    (strateji_id, sozlesme_kodu, enstruman_tipi, dayanak,
+                     opsiyon_tipi, strike, vade, yon, adet, kontrat_carpani,
+                     acilis_fiyat, acilis_tarih)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    yeni_strat_id,
+                    b["sozlesme_kodu"],
+                    b["enstruman_tipi"],
+                    b["dayanak"],
+                    b["opsiyon_tipi"],
+                    b["strike"],
+                    b["vade"],
+                    b["yon"],
+                    b["adet"],
+                    b["carpan"],
+                    b["acilis_fiyat"],
+                    s_acilis_tarih.strftime("%Y-%m-%d"),
+                ))
+
+            baglanti.commit()
+            senkronize_et()
+            _db_modul._baglanti = None  # bulk write sonrası
+
+            st.success(
+                f"✅ Strateji eklendi: **{s_ad}** "
+                f"({len(dolu_bacaklar)} bacak ile, ID: {yeni_strat_id})"
+            )
+
+            # --- Form state'ini temizle ---
+            for key in list(st.session_state.keys()):
+                if key.startswith("viop_ekle_"):
+                    del st.session_state[key]
+
+            import time
+            time.sleep(1.5)
+            st.rerun()
+
+# ==========================================
+# SAYFA: VIOP STRATEJİ DÜZENLE (Aşama 5.2 — CRUD)
+# ==========================================
+# Strateji düzenleme, bacak yönetimi (kapat/sil/ekle) ve silme.
+# Üç sekme yapısı:
+#   1) Strateji bilgileri — meta alanları güncelleme
+#   2) Bacaklar — açık bacakları kapatma, kapalı bacakları görüntüleme, yeni bacak ekleme
+#   3) Tehlikeli işlemler — toplu kapatma + strateji silme
+elif sayfa == "✏️ VIOP Strateji Düzenle":
+    st.title("✏️ VIOP Stratejisi Düzenle")
+    st.markdown("---")
+
+    from datetime import datetime as _dt_viop_duz
+
+    baglanti = veritabani_baglan()
+
+    # --- Tüm stratejileri çek ---
+    stratejiler_df = sql_oku("""
+        SELECT * FROM viop_stratejiler
+        ORDER BY acilis_tarih DESC
+    """, baglanti)
+
+    if stratejiler_df.empty:
+        st.info(
+            "Henüz VIOP stratejisi yok. Önce **➕ VIOP Strateji Ekle** sayfasından "
+            "bir strateji ekleyin."
+        )
+    else:
+        # Strateji tipleri (Ekle ile aynı liste)
+        VIOP_STRATEJI_TIPLERI = [
+            "Short Strangle", "Long Strangle",
+            "Short Straddle", "Long Straddle",
+            "Naked Call", "Naked Put", "Covered Call",
+            "Long Future", "Short Future",
+            "Bull Call Spread", "Bear Put Spread",
+            "Iron Condor", "Iron Butterfly",
+            "Diğer",
+        ]
+
+        # --- Strateji seçici ---
+        strat_secenekleri = {}
+        for _, s in stratejiler_df.iterrows():
+            durum_canli = viop_strateji_durumu(int(s["id"]))
+            if durum_canli == "Kapalı":
+                emoji = "⚪"
+            elif durum_canli == "Kısmi Açık":
+                emoji = "🟡"
+            elif durum_canli == "Bacak Yok":
+                emoji = "⚠️"
+            else:  # Açık
+                emoji = "🟢"
+            etiket = f"{emoji} #{s['id']} — {s['ad']}  ({s['acilis_tarih']})"
+            strat_secenekleri[etiket] = int(s["id"])
+
+        secili_etiket = st.selectbox(
+            "Düzenlenecek stratejiyi seç:",
+            list(strat_secenekleri.keys()),
+            key="viop_duzenle_secici",
+        )
+        strat_id = strat_secenekleri[secili_etiket]
+
+        # --- Strateji değişti mi? State temizliği + yeni değerleri doldurma ---
+        # ÖNEMLİ: Sadece `del` yapmak Streamlit'te yetmiyor — key'li widget'lar bir kez
+        # render edildikten sonra session_state'e öncelik veriyor, `value=` parametresini
+        # yok sayıyor. Bu yüzden strateji değişimini WIDGET RENDER EDİLMEDEN ÖNCE yakalayıp
+        # session_state'i yeni stratejinin değerleriyle doğrudan dolduruyoruz.
+        if ("viop_duzenle_aktif_strat" not in st.session_state
+                or st.session_state.viop_duzenle_aktif_strat != strat_id):
+            # 1) Önceki form state'lerini sil (selectbox ve aktif_strat hariç)
+            for key in list(st.session_state.keys()):
+                if (key.startswith("viop_duzenle_")
+                        and key not in ("viop_duzenle_secici",
+                                        "viop_duzenle_aktif_strat")):
+                    del st.session_state[key]
+
+            # 2) Yeni stratejinin değerlerini widget key'lerine yaz
+            init_strat = stratejiler_df[stratejiler_df["id"] == strat_id].iloc[0]
+
+            st.session_state["viop_duzenle_ad"]      = init_strat["ad"]
+            st.session_state["viop_duzenle_tipi"]    = (
+                init_strat["strateji_tipi"]
+                if init_strat["strateji_tipi"] in VIOP_STRATEJI_TIPLERI
+                else VIOP_STRATEJI_TIPLERI[0]
+            )
+            st.session_state["viop_duzenle_dayanak"] = init_strat["dayanak"]
+
+            # Açılış tarihi
+            try:
+                st.session_state["viop_duzenle_acilis_tarih"] = \
+                    _dt_viop_duz.strptime(init_strat["acilis_tarih"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                st.session_state["viop_duzenle_acilis_tarih"] = date.today()
+
+            # Açılış teminatı
+            st.session_state["viop_duzenle_teminat"] = (
+                float(init_strat["acilis_teminat"])
+                if not pd.isna(init_strat["acilis_teminat"])
+                else 0.0
+            )
+
+            # Aracı kurum — listede yoksa default ilk eleman
+            init_ak_listesi = araci_kurum_listesi()
+            if not pd.isna(init_strat["araci_kurum"]) and init_strat["araci_kurum"] in init_ak_listesi:
+                st.session_state["viop_duzenle_araci_kurum"] = init_strat["araci_kurum"]
+            else:
+                st.session_state["viop_duzenle_araci_kurum"] = init_ak_listesi[0]
+
+            # Portföy etiketi — listede yoksa default ilk eleman
+            init_pe_listesi = portfoy_etiketi_listesi()
+            if not pd.isna(init_strat["portfoy_etiketi"]) and init_strat["portfoy_etiketi"] in init_pe_listesi:
+                st.session_state["viop_duzenle_portfoy_etiketi"] = init_strat["portfoy_etiketi"]
+            else:
+                st.session_state["viop_duzenle_portfoy_etiketi"] = init_pe_listesi[0]
+
+            # Açıklama
+            st.session_state["viop_duzenle_aciklama"] = (
+                init_strat["aciklama"]
+                if not pd.isna(init_strat["aciklama"])
+                else ""
+            )
+
+            # Bağlı varlık — id'den etiket bulup set et
+            init_bv_etiket = "(yok)"
+            init_bv_id = init_strat["bagli_varlik_id"]
+            if init_bv_id is not None and not pd.isna(init_bv_id):
+                init_varliklar = sql_oku(
+                    "SELECT id, kod, ad FROM varliklar ORDER BY kod",
+                    veritabani_baglan(),
+                )
+                for _, r_init in init_varliklar.iterrows():
+                    if int(r_init["id"]) == int(init_bv_id):
+                        init_bv_etiket = f"{r_init['kod']} — {r_init['ad']}"
+                        break
+            st.session_state["viop_duzenle_bagli_varlik"] = init_bv_etiket
+
+            # 3) Aktif strateji'yi işaretle
+            st.session_state.viop_duzenle_aktif_strat = strat_id
+
+        # Seçili strateji satırı
+        strat = stratejiler_df[stratejiler_df["id"] == strat_id].iloc[0]
+
+        # Stratejinin bacakları
+        bacaklar = sql_oku(
+            f"SELECT * FROM viop_bacaklar WHERE strateji_id = {int(strat_id)} ORDER BY vade, strike",
+            baglanti,
+        )
+        acik_bacaklar   = bacaklar[bacaklar["kapanis_tarih"].isna()] if not bacaklar.empty else pd.DataFrame()
+        kapali_bacaklar = bacaklar[~bacaklar["kapanis_tarih"].isna()] if not bacaklar.empty else pd.DataFrame()
+
+        # --- Üç sekme ---
+        tab_bilgi, tab_bacaklar, tab_tehlike = st.tabs([
+            "📝 Strateji Bilgileri",
+            f"📊 Bacaklar ({len(acik_bacaklar)} açık / {len(kapali_bacaklar)} kapalı)",
+            "⚠️ Tehlikeli İşlemler",
+        ])
+
+        # ==========================================
+        # SEKME 1: STRATEJİ BİLGİLERİ — Güncelle Formu
+        # ==========================================
+        with tab_bilgi:
+            col_b1, col_b2 = st.columns(2)
+
+            with col_b1:
+                y_ad = st.text_input(
+                    "Strateji Adı *",
+                    value=strat["ad"],
+                    key="viop_duzenle_ad",
+                )
+                y_tipi_idx = (VIOP_STRATEJI_TIPLERI.index(strat["strateji_tipi"])
+                              if strat["strateji_tipi"] in VIOP_STRATEJI_TIPLERI else 0)
+                y_tipi = st.selectbox(
+                    "Strateji Tipi *",
+                    VIOP_STRATEJI_TIPLERI,
+                    index=y_tipi_idx,
+                    key="viop_duzenle_tipi",
+                )
+                y_dayanak = st.text_input(
+                    "Dayanak *",
+                    value=strat["dayanak"],
+                    key="viop_duzenle_dayanak",
+                )
+                # Açılış tarihi
+                try:
+                    y_acilis_default = _dt_viop_duz.strptime(strat["acilis_tarih"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    y_acilis_default = date.today()
+                y_acilis_tarih = st.date_input(
+                    "Açılış Tarihi",
+                    value=y_acilis_default,
+                    key="viop_duzenle_acilis_tarih",
+                )
+
+                y_teminat_default = float(strat["acilis_teminat"]) if not pd.isna(strat["acilis_teminat"]) else 0.0
+                y_acilis_teminat = st.number_input(
+                    "Açılış Teminatı (TL)",
+                    min_value=0.0,
+                    value=y_teminat_default,
+                    step=100.0,
+                    key="viop_duzenle_teminat",
+                )
+
+            with col_b2:
+                # Aracı kurum
+                ak_listesi = araci_kurum_listesi()
+                mevcut_ak = strat["araci_kurum"] if not pd.isna(strat["araci_kurum"]) else ""
+                ak_idx = ak_listesi.index(mevcut_ak) if mevcut_ak in ak_listesi else 0
+                y_araci_kurum = st.selectbox(
+                    "Aracı Kurum",
+                    ak_listesi,
+                    index=ak_idx,
+                    key="viop_duzenle_araci_kurum",
+                )
+
+                # Portföy etiketi
+                pe_listesi = portfoy_etiketi_listesi()
+                mevcut_pe = strat["portfoy_etiketi"] if not pd.isna(strat["portfoy_etiketi"]) else ""
+                pe_idx = pe_listesi.index(mevcut_pe) if mevcut_pe in pe_listesi else 0
+                y_portfoy_etiketi = st.selectbox(
+                    "Portföy Etiketi",
+                    pe_listesi,
+                    index=pe_idx,
+                    key="viop_duzenle_portfoy_etiketi",
+                )
+
+                # Bağlı varlık
+                varliklar_df_d = sql_oku(
+                    "SELECT id, kod, ad FROM varliklar ORDER BY kod",
+                    veritabani_baglan(),
+                )
+                if not varliklar_df_d.empty:
+                    varlik_secenekleri_d = ["(yok)"] + [
+                        f"{r['kod']} — {r['ad']}" for _, r in varliklar_df_d.iterrows()
+                    ]
+                    varlik_id_map_d = {
+                        f"{r['kod']} — {r['ad']}": int(r["id"])
+                        for _, r in varliklar_df_d.iterrows()
+                    }
+                else:
+                    varlik_secenekleri_d = ["(yok)"]
+                    varlik_id_map_d = {}
+
+                # Mevcut bağlı varlık varsa onu seç
+                mevcut_bv_id = strat["bagli_varlik_id"]
+                mevcut_bv_etiket = "(yok)"
+                if mevcut_bv_id is not None and not pd.isna(mevcut_bv_id):
+                    for etiket, vid in varlik_id_map_d.items():
+                        if vid == int(mevcut_bv_id):
+                            mevcut_bv_etiket = etiket
+                            break
+
+                bv_idx = (varlik_secenekleri_d.index(mevcut_bv_etiket)
+                          if mevcut_bv_etiket in varlik_secenekleri_d else 0)
+                y_bagli_varlik_secim = st.selectbox(
+                    "Bağlı Varlık (Covered Call için)",
+                    varlik_secenekleri_d,
+                    index=bv_idx,
+                    key="viop_duzenle_bagli_varlik",
+                )
+
+            y_aciklama_default = strat["aciklama"] if not pd.isna(strat["aciklama"]) else ""
+            y_aciklama = st.text_area(
+                "Açıklama",
+                value=y_aciklama_default,
+                key="viop_duzenle_aciklama",
+                height=70,
+            )
+
+            st.markdown("---")
+
+            if st.button("💾 Strateji Bilgilerini Güncelle", type="primary",
+                         key="viop_duzenle_bilgi_guncelle"):
+                # Validation
+                hatalar_d = []
+                if not y_ad or len(y_ad.strip()) < 3:
+                    hatalar_d.append("Strateji adı en az 3 karakter olmalı.")
+                if not y_dayanak or not y_dayanak.strip():
+                    hatalar_d.append("Dayanak boş olamaz.")
+
+                if hatalar_d:
+                    for h in hatalar_d:
+                        st.error(f"❌ {h}")
+                else:
+                    bagli_varlik_id_d = varlik_id_map_d.get(y_bagli_varlik_secim)
+
+                    import db as _db_d
+                    _db_d._baglanti = None
+                    baglanti_d = veritabani_baglan()
+                    cursor_d   = baglanti_d.cursor()
+
+                    cursor_d.execute("""
+                        UPDATE viop_stratejiler
+                        SET ad = ?, strateji_tipi = ?, dayanak = ?, acilis_tarih = ?,
+                            bagli_varlik_id = ?, acilis_teminat = ?, araci_kurum = ?,
+                            portfoy_etiketi = ?, aciklama = ?
+                        WHERE id = ?
+                    """, (
+                        y_ad.strip(),
+                        y_tipi,
+                        y_dayanak.strip().upper(),
+                        y_acilis_tarih.strftime("%Y-%m-%d"),
+                        bagli_varlik_id_d,
+                        y_acilis_teminat if y_acilis_teminat > 0 else None,
+                        y_araci_kurum if y_araci_kurum else None,
+                        y_portfoy_etiketi if y_portfoy_etiketi else None,
+                        y_aciklama.strip() if y_aciklama else None,
+                        int(strat_id),
+                    ))
+
+                    baglanti_d.commit()
+                    senkronize_et()
+                    _db_d._baglanti = None
+
+                    st.success(f"✅ Strateji bilgileri güncellendi.")
+                    import time
+                    time.sleep(1)
+                    st.rerun()
+
+        # ==========================================
+        # SEKME 2: BACAKLAR — Kapat / Sil / Yeni Ekle
+        # ==========================================
+        with tab_bacaklar:
+            # --- A) AÇIK BACAKLAR ---
+            st.markdown("### Açık Bacaklar")
+
+            if acik_bacaklar.empty:
+                st.info("Bu stratejinin açık bacağı yok.")
+            else:
+                for _, b in acik_bacaklar.iterrows():
+                    bacak_id = int(b["id"])
+
+                    # Son uzlaşma fiyatı (varsa) — kapanış fiyatı default'u olarak
+                    son_fiyat_df = sql_oku("""
+                        SELECT fiyat FROM viop_fiyat_gecmisi
+                        WHERE sozlesme_kodu = ?
+                        ORDER BY tarih DESC LIMIT 1
+                    """, baglanti, params=(b["sozlesme_kodu"],))
+
+                    if not son_fiyat_df.empty:
+                        son_fiyat = float(son_fiyat_df.iloc[0]["fiyat"])
+                    else:
+                        son_fiyat = float(b["acilis_fiyat"])  # fallback: açılış fiyatı
+
+                    # Bacak başlığı
+                    if b["enstruman_tipi"] == "Opsiyon":
+                        tip_metin = f"{b['opsiyon_tipi']} {float(b['strike']):,.2f}"
+                    else:
+                        tip_metin = "Future"
+
+                    seviye = viop_uyari_seviyesi(b["vade"])
+                    seviye_emoji = {"normal": "🟢", "sari": "🟡",
+                                    "turuncu": "🟠", "kirmizi": "🔴"}.get(seviye, "🟢")
+
+                    bacak_baslik = (f"{seviye_emoji} `{b['sozlesme_kodu']}` — "
+                                    f"{tip_metin} | {b['yon']} {int(b['adet'])} | "
+                                    f"Vade: {b['vade']}")
+
+                    with st.expander(bacak_baslik):
+                        # Salt-okunur özet
+                        st.markdown(
+                            f"**Açılış Fiyatı:** {float(b['acilis_fiyat']):,.2f}  |  "
+                            f"**Çarpan:** {float(b['kontrat_carpani']):.1f}  |  "
+                            f"**Açılış Tarihi:** {b['acilis_tarih']}"
+                        )
+
+                        st.markdown("---")
+                        st.markdown("##### Bu Bacağı Kapat")
+
+                        col_kf, col_kt = st.columns(2)
+                        with col_kf:
+                            kapanis_fiyat_input = st.number_input(
+                                "Kapanış Fiyatı",
+                                min_value=0.0,
+                                value=son_fiyat,
+                                step=0.01,
+                                format="%.2f",
+                                key=f"viop_duzenle_kapanis_fiyat_{bacak_id}",
+                                help=f"Son uzlaşma fiyatı varsayılan: {son_fiyat:,.2f}",
+                            )
+                        with col_kt:
+                            kapanis_tarih_input = st.date_input(
+                                "Kapanış Tarihi",
+                                value=date.today(),
+                                key=f"viop_duzenle_kapanis_tarih_{bacak_id}",
+                            )
+
+                        col_kapat, col_sil, _ = st.columns([1, 1, 3])
+
+                        with col_kapat:
+                            if st.button("🚪 Bacağı Kapat",
+                                         key=f"viop_duzenle_kapat_btn_{bacak_id}",
+                                         type="primary"):
+                                # Kapanış tarihi açılış tarihinden önce olamaz
+                                try:
+                                    acilis_dt = _dt_viop_duz.strptime(
+                                        b["acilis_tarih"], "%Y-%m-%d"
+                                    ).date()
+                                except (ValueError, TypeError):
+                                    acilis_dt = date.today()
+
+                                if kapanis_tarih_input < acilis_dt:
+                                    st.error("❌ Kapanış tarihi açılış tarihinden önce olamaz.")
+                                else:
+                                    import db as _db_kap
+                                    _db_kap._baglanti = None
+                                    baglanti_kap = veritabani_baglan()
+                                    cursor_kap   = baglanti_kap.cursor()
+
+                                    cursor_kap.execute("""
+                                        UPDATE viop_bacaklar
+                                        SET kapanis_fiyat = ?, kapanis_tarih = ?
+                                        WHERE id = ?
+                                    """, (
+                                        float(kapanis_fiyat_input),
+                                        kapanis_tarih_input.strftime("%Y-%m-%d"),
+                                        bacak_id,
+                                    ))
+
+                                    baglanti_kap.commit()
+                                    senkronize_et()
+                                    _db_kap._baglanti = None
+
+                                    st.success(f"✅ Bacak kapatıldı: {b['sozlesme_kodu']}")
+                                    import time
+                                    time.sleep(1)
+                                    st.rerun()
+
+                        with col_sil:
+                            sil_onay_key = f"viop_duzenle_bacak_sil_onay_{bacak_id}"
+                            if st.button("🗑️ Bacağı Sil",
+                                         key=f"viop_duzenle_bacak_sil_btn_{bacak_id}"):
+                                st.session_state[sil_onay_key] = True
+
+                            if st.session_state.get(sil_onay_key):
+                                st.warning(
+                                    "⚠️ Bu bacak tamamen silinecek. Hata düzeltmek için "
+                                    "kullanın — kapatma için kapanış formunu kullanın."
+                                )
+                                if st.button("✅ Silmeyi Onayla",
+                                             key=f"viop_duzenle_bacak_sil_kabul_{bacak_id}"):
+                                    import db as _db_bsl
+                                    _db_bsl._baglanti = None
+                                    baglanti_bsl = veritabani_baglan()
+                                    cursor_bsl   = baglanti_bsl.cursor()
+                                    cursor_bsl.execute(
+                                        "DELETE FROM viop_bacaklar WHERE id = ?",
+                                        (bacak_id,),
+                                    )
+                                    baglanti_bsl.commit()
+                                    senkronize_et()
+                                    _db_bsl._baglanti = None
+
+                                    del st.session_state[sil_onay_key]
+                                    st.success(f"✅ Bacak silindi: {b['sozlesme_kodu']}")
+                                    import time
+                                    time.sleep(1)
+                                    st.rerun()
+
+            # --- B) KAPALI BACAKLAR (Salt-okunur) ---
+            st.markdown("---")
+            st.markdown("### Kapalı Bacaklar")
+
+            if kapali_bacaklar.empty:
+                st.info("Bu stratejide kapalı bacak yok.")
+            else:
+                kapali_tablo = []
+                for _, b in kapali_bacaklar.iterrows():
+                    if b["enstruman_tipi"] == "Opsiyon":
+                        tip_str = f"{b['opsiyon_tipi']} {float(b['strike']):,.2f}"
+                    else:
+                        tip_str = "Future"
+
+                    # Realized P&L = (kapanış - açılış) × adet × çarpan × yön
+                    yon_carpani = 1 if b["yon"] == "Long" else -1
+                    realized = ((float(b["kapanis_fiyat"]) - float(b["acilis_fiyat"]))
+                                * int(b["adet"]) * float(b["kontrat_carpani"])
+                                * yon_carpani)
+
+                    kapali_tablo.append({
+                        "Sözleşme Kodu" : b["sozlesme_kodu"],
+                        "Tip"           : tip_str,
+                        "Yön"           : b["yon"],
+                        "Adet"          : int(b["adet"]),
+                        "Açılış Fiyatı" : f"{float(b['acilis_fiyat']):,.2f}",
+                        "Kapanış Fiyatı": f"{float(b['kapanis_fiyat']):,.2f}",
+                        "Kapanış Tarihi": b["kapanis_tarih"],
+                        "Realized P&L"  : f"{realized:+,.0f} TL",
+                    })
+
+                st.dataframe(
+                    pd.DataFrame(kapali_tablo),
+                    use_container_width=True, hide_index=True,
+                )
+
+            # --- C) YENİ BACAK EKLE ---
+            st.markdown("---")
+            st.markdown("### ➕ Yeni Bacak Ekle")
+            st.caption(
+                "Bu stratejiye yeni bir bacak eklemek için sözleşme kodunu yazıp "
+                "**🔍 Parse Et**'e basın, alanları kontrol edip **Bacağı Kaydet**'e tıklayın."
+            )
+
+            with st.expander("Yeni Bacak Formu", expanded=False):
+                # --- Sözleşme kodu + Parse ---
+                col_yk_kod, col_yk_parse = st.columns([4, 1])
+
+                with col_yk_kod:
+                    yb_sozlesme = st.text_input(
+                        "Sözleşme Kodu",
+                        key="viop_duzenle_yb_sk",
+                        placeholder="Örn: O_XU030E0826P17000.00",
+                    )
+
+                with col_yk_parse:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    if st.button("🔍 Parse Et", key="viop_duzenle_yb_parse_btn"):
+                        if not yb_sozlesme.strip():
+                            st.warning("Önce sözleşme kodu girin.")
+                        else:
+                            yb_parse = viop_sozlesme_parse(yb_sozlesme)
+                            if yb_parse is None:
+                                st.error(f"❌ Sözleşme kodu tanınmadı: `{yb_sozlesme}`")
+                            else:
+                                yb_parse["carpan"] = viop_carpan_tahmin(yb_parse["dayanak"])
+                                st.session_state["viop_duzenle_yb_parse"] = yb_parse
+
+                                # KRİTİK: Widget key'lerini doğrudan güncelle (Streamlit tuzağı)
+                                st.session_state["viop_duzenle_yb_ens"] = yb_parse["enstruman_tipi"]
+                                if yb_parse.get("opsiyon_tipi"):
+                                    st.session_state["viop_duzenle_yb_opt"] = yb_parse["opsiyon_tipi"]
+                                if yb_parse.get("strike") is not None:
+                                    st.session_state["viop_duzenle_yb_strike"] = float(yb_parse["strike"])
+                                if yb_parse.get("vade"):
+                                    try:
+                                        st.session_state["viop_duzenle_yb_vade"] = \
+                                            _dt_viop_duz.strptime(yb_parse["vade"], "%Y-%m-%d").date()
+                                    except ValueError:
+                                        pass
+                                st.session_state["viop_duzenle_yb_carpan"] = float(yb_parse["carpan"])
+
+                                st.rerun()
+
+                yb_parse_data = st.session_state.get("viop_duzenle_yb_parse", {})
+
+                col_ya, col_yb, col_yc = st.columns(3)
+
+                with col_ya:
+                    yb_ens_default = yb_parse_data.get("enstruman_tipi", "Opsiyon")
+                    yb_ens = st.selectbox(
+                        "Enstrüman Tipi",
+                        ["Opsiyon", "Future"],
+                        index=0 if yb_ens_default == "Opsiyon" else 1,
+                        key="viop_duzenle_yb_ens",
+                    )
+                with col_yb:
+                    if yb_ens == "Opsiyon":
+                        yb_opt_default = yb_parse_data.get("opsiyon_tipi", "Call") or "Call"
+                        yb_opt = st.selectbox(
+                            "Opsiyon Tipi", ["Call", "Put"],
+                            index=0 if yb_opt_default == "Call" else 1,
+                            key="viop_duzenle_yb_opt",
+                        )
+                    else:
+                        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                        st.text("— (future)")
+                        yb_opt = None
+                with col_yc:
+                    if yb_ens == "Opsiyon":
+                        yb_strike_def = yb_parse_data.get("strike") or 0.0
+                        yb_strike = st.number_input(
+                            "Strike",
+                            min_value=0.0,
+                            value=float(yb_strike_def),
+                            step=100.0,
+                            format="%.2f",
+                            key="viop_duzenle_yb_strike",
+                        )
+                    else:
+                        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                        st.text("— (future)")
+                        yb_strike = None
+
+                col_yd, col_ye, col_yf = st.columns(3)
+                with col_yd:
+                    yb_vade_def_str = yb_parse_data.get("vade", "")
+                    if yb_vade_def_str:
+                        try:
+                            yb_vade_def = _dt_viop_duz.strptime(yb_vade_def_str, "%Y-%m-%d").date()
+                        except ValueError:
+                            yb_vade_def = date.today() + timedelta(days=30)
+                    else:
+                        yb_vade_def = date.today() + timedelta(days=30)
+                    yb_vade = st.date_input(
+                        "Vade", value=yb_vade_def, key="viop_duzenle_yb_vade",
+                    )
+                with col_ye:
+                    yb_yon = st.selectbox(
+                        "Yön", ["Long", "Short"], key="viop_duzenle_yb_yon",
+                    )
+                with col_yf:
+                    yb_adet = st.number_input(
+                        "Adet", min_value=1, value=1, step=1,
+                        key="viop_duzenle_yb_adet",
+                    )
+
+                col_yg, col_yh, col_yi = st.columns(3)
+                with col_yg:
+                    yb_carpan_def = float(yb_parse_data.get("carpan", 100.0))
+                    yb_carpan = st.number_input(
+                        "Kontrat Çarpanı", min_value=0.01,
+                        value=yb_carpan_def, step=10.0,
+                        key="viop_duzenle_yb_carpan",
+                    )
+                with col_yh:
+                    yb_acilis_fiyat = st.number_input(
+                        "Açılış Fiyatı", min_value=0.0, value=0.0,
+                        step=0.01, format="%.2f",
+                        key="viop_duzenle_yb_acilis_fiyat",
+                    )
+                with col_yi:
+                    yb_acilis_tarih = st.date_input(
+                        "Açılış Tarihi", value=date.today(),
+                        key="viop_duzenle_yb_acilis_tarih",
+                    )
+
+                if st.button("💾 Bacağı Stratejiye Ekle",
+                             type="primary", key="viop_duzenle_yb_kaydet"):
+                    hatalar_yb = []
+                    if not yb_sozlesme.strip():
+                        hatalar_yb.append("Sözleşme kodu boş olamaz.")
+                    if yb_ens == "Opsiyon":
+                        if not yb_opt:
+                            hatalar_yb.append("Opsiyon tipi seçilmeli.")
+                        if yb_strike is None or yb_strike <= 0:
+                            hatalar_yb.append("Strike pozitif olmalı.")
+                    if yb_adet < 1:
+                        hatalar_yb.append("Adet ≥ 1 olmalı.")
+                    if yb_carpan <= 0:
+                        hatalar_yb.append("Çarpan > 0 olmalı.")
+                    if yb_acilis_fiyat < 0:
+                        hatalar_yb.append("Açılış fiyatı negatif olamaz.")
+                    if yb_vade < yb_acilis_tarih:
+                        hatalar_yb.append("Vade, açılış tarihinden önce olamaz.")
+
+                    if hatalar_yb:
+                        for h in hatalar_yb:
+                            st.error(f"❌ {h}")
+                    else:
+                        # Bacak dayanağı: parse'tan veya stratejinin dayanağından
+                        bacak_dayanak = (yb_parse_data.get("dayanak")
+                                         or strat["dayanak"]).upper()
+
+                        import db as _db_yb
+                        _db_yb._baglanti = None
+                        baglanti_yb = veritabani_baglan()
+                        cursor_yb   = baglanti_yb.cursor()
+
+                        cursor_yb.execute("""
+                            INSERT INTO viop_bacaklar
+                            (strateji_id, sozlesme_kodu, enstruman_tipi, dayanak,
+                             opsiyon_tipi, strike, vade, yon, adet, kontrat_carpani,
+                             acilis_fiyat, acilis_tarih)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            int(strat_id),
+                            yb_sozlesme.strip(),
+                            yb_ens,
+                            bacak_dayanak,
+                            yb_opt,
+                            yb_strike,
+                            yb_vade.strftime("%Y-%m-%d"),
+                            yb_yon,
+                            int(yb_adet),
+                            float(yb_carpan),
+                            float(yb_acilis_fiyat),
+                            yb_acilis_tarih.strftime("%Y-%m-%d"),
+                        ))
+
+                        baglanti_yb.commit()
+                        senkronize_et()
+                        _db_yb._baglanti = None
+
+                        # Eğer strateji "Kapalı" idiyse → bir bacak açıldı, durumu güncelle
+                        if strat["durum"] == "Kapalı":
+                            import db as _db_ds
+                            _db_ds._baglanti = None
+                            bag_ds = veritabani_baglan()
+                            cur_ds = bag_ds.cursor()
+                            cur_ds.execute(
+                                "UPDATE viop_stratejiler SET durum = ?, kapanis_tarih = NULL WHERE id = ?",
+                                ("Açık", int(strat_id)),
+                            )
+                            bag_ds.commit()
+                            senkronize_et()
+                            _db_ds._baglanti = None
+
+                        st.success(f"✅ Bacak eklendi: {yb_sozlesme.strip()}")
+                        # Yeni bacak formu state'ini temizle
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("viop_duzenle_yb_"):
+                                del st.session_state[k]
+                        import time
+                        time.sleep(1)
+                        st.rerun()
+
+        # ==========================================
+        # SEKME 3: TEHLİKELİ İŞLEMLER
+        # ==========================================
+        with tab_tehlike:
+            # --- 3.A) TÜM AÇIK BACAKLARI KAPAT (Toplu) ---
+            st.markdown("### 🚪 Tüm Açık Bacakları Kapat (Toplu)")
+
+            if acik_bacaklar.empty:
+                st.info("Bu stratejinin açık bacağı yok — toplu kapatma için bir şey yok.")
+            else:
+                st.markdown(
+                    f"Aşağıdaki **{len(acik_bacaklar)} açık bacak** seçilen tarihte, "
+                    "her birinin **son uzlaşma fiyatıyla** kapatılacaktır. Fiyat verisi "
+                    "olmayan bacaklar atlanır ve listelenir."
+                )
+
+                toplu_kapanis_tarih = st.date_input(
+                    "Toplu Kapanış Tarihi",
+                    value=date.today(),
+                    key="viop_duzenle_toplu_kapanis_tarih",
+                )
+
+                if st.button("🚪 Tüm Açık Bacakları Şimdi Kapat",
+                             key="viop_duzenle_toplu_kapat_btn"):
+                    kapanan_sayisi = 0
+                    atlananlar    = []  # (sozlesme_kodu, sebep)
+
+                    import db as _db_top
+                    _db_top._baglanti = None
+                    baglanti_top = veritabani_baglan()
+                    cursor_top   = baglanti_top.cursor()
+
+                    for _, b in acik_bacaklar.iterrows():
+                        bacak_id_b = int(b["id"])
+
+                        # Son uzlaşma fiyatını çek
+                        sf_df = sql_oku("""
+                            SELECT fiyat FROM viop_fiyat_gecmisi
+                            WHERE sozlesme_kodu = ?
+                            ORDER BY tarih DESC LIMIT 1
+                        """, baglanti_top, params=(b["sozlesme_kodu"],))
+
+                        if sf_df.empty:
+                            atlananlar.append((b["sozlesme_kodu"], "fiyat verisi yok"))
+                            continue
+
+                        son_fiyat_b = float(sf_df.iloc[0]["fiyat"])
+
+                        # Açılış tarihi kontrolü
+                        try:
+                            acilis_dt_b = _dt_viop_duz.strptime(
+                                b["acilis_tarih"], "%Y-%m-%d"
+                            ).date()
+                        except (ValueError, TypeError):
+                            acilis_dt_b = date.today()
+
+                        if toplu_kapanis_tarih < acilis_dt_b:
+                            atlananlar.append((b["sozlesme_kodu"],
+                                               "kapanış tarihi açılıştan önce"))
+                            continue
+
+                        cursor_top.execute("""
+                            UPDATE viop_bacaklar
+                            SET kapanis_fiyat = ?, kapanis_tarih = ?
+                            WHERE id = ?
+                        """, (
+                            son_fiyat_b,
+                            toplu_kapanis_tarih.strftime("%Y-%m-%d"),
+                            bacak_id_b,
+                        ))
+                        kapanan_sayisi += 1
+
+                    baglanti_top.commit()
+                    senkronize_et()
+                    _db_top._baglanti = None
+
+                    if kapanan_sayisi > 0:
+                        st.success(f"✅ {kapanan_sayisi} bacak kapatıldı.")
+                    if atlananlar:
+                        st.warning(
+                            "⚠️ Atlanan bacaklar:\n\n"
+                            + "\n\n".join(f"• `{k}` — {s}" for k, s in atlananlar)
+                        )
+                    if kapanan_sayisi > 0:
+                        import time
+                        time.sleep(2)
+                        st.rerun()
+
+            # --- 3.B) STRATEJİYİ TAMAMEN SİL ---
+            st.markdown("---")
+            st.markdown("### 🗑️ Stratejinin Tamamını Sil")
+
+            bacak_sayisi = len(bacaklar)
+            st.warning(
+                f"⚠️ Bu işlem geri alınamaz:\n\n"
+                f"- **{bacak_sayisi} adet bacak** silinecek\n"
+                f"- Strateji bilgileri tamamen kaybolacak\n"
+                f"- Fiyat geçmişi verileri (`viop_fiyat_gecmisi`) **silinmeyecek** — "
+                f"sözleşme kodları geçmiş veri olarak tabloda kalır\n"
+                f"- Teminat snapshot'ları (`viop_teminat_anlik`) **silinmeyecek**"
+            )
+
+            sil_onay = st.checkbox(
+                "Silinmesini onaylıyorum",
+                key="viop_duzenle_strat_sil_onay",
+            )
+
+            if st.button("🗑️ Stratejiyi Sil",
+                         disabled=not sil_onay,
+                         key="viop_duzenle_strat_sil_btn"):
+                import db as _db_sil
+                _db_sil._baglanti = None
+                baglanti_sil = veritabani_baglan()
+                cursor_sil   = baglanti_sil.cursor()
+
+                # Önce bacaklar (FK kısıtı nedeniyle)
+                cursor_sil.execute(
+                    "DELETE FROM viop_bacaklar WHERE strateji_id = ?",
+                    (int(strat_id),),
+                )
+                # Sonra strateji
+                cursor_sil.execute(
+                    "DELETE FROM viop_stratejiler WHERE id = ?",
+                    (int(strat_id),),
+                )
+
+                baglanti_sil.commit()
+                senkronize_et()
+                _db_sil._baglanti = None
+
+                # State temizle
+                for key in list(st.session_state.keys()):
+                    if key.startswith("viop_duzenle_"):
+                        del st.session_state[key]
+
+                st.success(f"✅ Strateji silindi: {strat['ad']}")
+                import time
+                time.sleep(1.5)
                 st.rerun()
 
 # ==========================================

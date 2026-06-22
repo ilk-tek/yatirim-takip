@@ -685,6 +685,49 @@ def donemsel_karsilastirma_hesapla(baslangic_tarih, bitis_tarih):
 
 
 # Regex desenleri (modül seviyesinde tanımlı, her çağrıda yeniden derlenmesin diye)
+# ==========================================
+# VIOP — KONTRAT ÇARPANI VARSAYILANLARI
+# ==========================================
+# Sözleşme kodu parse edildiğinde dayanak'a göre çarpan tahmini yapılır.
+# Listede olmayan dayanak için VIOP_CARPAN_DEFAULT (100) kullanılır.
+# Kullanıcı UI'da bu değeri her zaman elle değiştirebilir.
+
+VIOP_CARPAN_VARSAYILAN = {
+    # Endeks sözleşmeleri
+    "XU030"  : 10.0,   # BIST 30 Endeksi
+    "XU100"  : 10.0,   # BIST 100 Endeksi
+    "XBANK"  : 10.0,   # BIST Banka Endeksi
+
+    # Döviz sözleşmeleri (TL paritesi ve EURUSD)
+    "USDTRY" : 1000.0,
+    "EURTRY" : 1000.0,
+    "GBPTRY" : 1000.0,
+    "EURUSD" : 1000.0,
+
+    # Kıymetli metaller
+    "XAUTRY" : 10.0,   # Gram Altın (TL bazlı)
+    "XAUUSD" : 1.0,    # Ons Altın (USD bazlı)
+    "XAGTRY" : 10.0,   # Gram Gümüş (TL bazlı, varsa)
+    "XAGUSD" : 50.0,   # Ons Gümüş (USD bazlı)
+
+    # Emtia
+    "BRENT"  : 10.0,   # Brent Petrol
+}
+
+# Listede olmayan dayanak için (genellikle BIST hisse opsiyonları)
+VIOP_CARPAN_DEFAULT = 100.0
+
+
+def viop_carpan_tahmin(dayanak):
+    """
+    Dayanak için varsayılan kontrat çarpanını döndürür.
+    Listede yoksa VIOP_CARPAN_DEFAULT (hisse opsiyonu standardı) döner.
+    """
+    if dayanak is None:
+        return VIOP_CARPAN_DEFAULT
+    return VIOP_CARPAN_VARSAYILAN.get(dayanak.upper(), VIOP_CARPAN_DEFAULT)
+
+
 _VIOP_OPSIYON_PATTERN = re.compile(
     r'^O_(.+)([EA])(\d{4})([CP])(\d+(?:\.\d+)?)$'
 )
