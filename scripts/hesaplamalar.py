@@ -1471,6 +1471,8 @@ def viop_yil_uyari_tara(yil):
     (her ay sonu girilen) bir kullanıcıda liste boş döner.
     """
     uyarilar = []
+    bugun_str = date.today().strftime("%Y-%m-%d")
+
     for ay in range(1, 13):
         # Ay sonu tarihi formülü aylik_portfoy_ozeti ile birebir aynı
         if ay == 12:
@@ -1483,6 +1485,12 @@ def viop_yil_uyari_tara(yil):
         viop_kesim = (
             datetime.strptime(ay_sonu, "%Y-%m-%d") - timedelta(days=1)
         ).strftime("%Y-%m-%d")
+
+        # Gelecekteki aylar için uyarı verme (henüz o ay tamamlanmadı).
+        # Örn. bugün 23 Haziran 2026 ise Haziran-Aralık 2026 için stale
+        # uyarısı anlamsız çünkü henüz o ay sonu gelmedi.
+        if viop_kesim > bugun_str:
+            continue
 
         sonuc = viop_portfoy_degeri(tarih=viop_kesim)
         if sonuc.get("uyari"):

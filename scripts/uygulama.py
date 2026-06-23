@@ -227,7 +227,7 @@ if sayfa == "📊 Portföy":
             SELECT MAX(tarih) as tarih FROM fiyat_gecmisi
         """, veritabani_baglan()).iloc[0]["tarih"]
         if son_guncelleme:
-            st.info(f"📅 Son fiyat güncellemesi: **{son_guncelleme}** — Güncellemek için 💱 Fiyat Güncelle sayfasına gidin.")
+            st.info(f"📅 Son fiyat güncellemesi: **{son_guncelleme}**")
         else:
             st.warning("Henüz fiyat girilmemiş. 💱 Fiyat Güncelle sayfasından fiyat girin.")
 
@@ -332,10 +332,12 @@ if sayfa == "📊 Portföy":
                 "Exposure"       : row["exposure"],
                 "Adet"           : row["toplam_adet"],
                 "Maliyet (TL)"   : pozisyon_maliyet,
+                "Maliyet (USD)"  : pozisyon_maliyet / usd_kuru_bugun,
                 "Değer (TL)"     : guncel_deger,
-                "Kâr/Zarar (TL)" : kar_zarar,
-                "Getiri %"       : yuzde_getiri,
                 "Değer (USD)"    : guncel_deger / usd_kuru_bugun,
+                "Kâr/Zarar (TL)" : kar_zarar,
+                "Kâr/Zarar (USD)": kar_zarar / usd_kuru_bugun,
+                "Getiri %"       : yuzde_getiri,
             })
 
         if ozet:
@@ -371,10 +373,19 @@ if sayfa == "📊 Portföy":
             col4, col5, col6 = st.columns(3)
             col4.metric("💵 Maliyet (USD)",       f"${portfoy_toplam_maliyet / usd_kuru_bugun:,.0f}")
             col5.metric("💵 Güncel Değer (USD)",   f"${toplam_deger / usd_kuru_bugun:,.0f}")
-            col6.metric("💵 Kâr/Zarar (USD)",     f"${toplam_kar / usd_kuru_bugun:,.0f}",
+            col6.metric("💵 Toplam Kâr/Zarar (USD)", f"${toplam_kar / usd_kuru_bugun:,.0f}",
                         delta=f"{toplam_getiri:.2f}%")
 
-            st.caption("ℹ️ Gerçekleşmemiş (unrealized) kâr/zarar. Maliyet: FIFO yöntemi, alış tarihindeki döviz kuru ile TL'ye çevrilir. Güncel Değer: adet × son fiyat × bugünkü kur.")
+            st.caption(
+                "ℹ️ **Toplam Kâr/Zarar:** Gerçekleşmemiş (unrealized) kâr/zarardır. "
+                "**Maliyet:** FIFO yöntemi, alış tarihindeki döviz kuru ile TL'ye "
+                "çevrilir. **Güncel Değer:** adet × son fiyat × bugünkü kur'dur. "
+                "**TL mevduat** için kâr/zarar her zaman 0'dır. **YP Mevduat** "
+                "satırlarında görünen TL kâr/zarar yalnızca kur farkı kaynaklıdır. "
+                "**📅 Aylık Özet** sayfasında yer alan aylık getiri ise, mevduat "
+                "hesaplarının faiz, komisyon vb. sebeplerle bakiye değişimini "
+                "**net getiri** olarak dikkate almaktadır."
+            )
 
             # ==========================================
             # HİYERARŞİK PORTFÖY ÖZETİ: Exposure → Tür → Varlık
@@ -417,17 +428,35 @@ if sayfa == "📊 Portföy":
             if viop_ozet["var_mi"]:
                 portfoy_toplam_tl += viop_ozet["deger_tl"]
 
-            # --- Yardımcı fonksiyonlar ---
+            # --- Yardımcı fonksiyonlar (Madde 12: K/Z + Getiri eklendi) ---
             def pf_deger_str(filtre_df, toplam):
-                """Değer + pay string'i oluşturur."""
+                """
+                Expander başlığı için özet string'i.
+                Mevcut: Değer TL | Pay %
+                Yeni: + K/Z (renkli emoji ile) + Getiri %
+                """
                 tl  = filtre_df["Değer (TL)"].sum()
-                usd = filtre_df["Değer (USD)"].sum()
                 pay = (tl / toplam * 100) if toplam else 0
+
+                # K/Z toplamı (TL)
+                kz_tl = filtre_df["Kâr/Zarar (TL)"].sum()
+                # Ağırlıklı getiri: K/Z toplamı / maliyet toplamı
+                maliyet_tl = filtre_df["Maliyet (TL)"].sum()
+                getiri = (kz_tl / maliyet_tl * 100) if maliyet_tl else 0
+
+                kz_emoji = "🟢" if kz_tl >= 0 else "🔴"
+
                 return (
                     f"**{tl:,.0f} TL** | "
-                    f"**${usd:,.0f}** | "
-                    f"Pay: **%{pay:.1f}**"
+                    f"Pay **%{pay:.1f}** | "
+                    f"K/Z {kz_emoji} **{kz_tl:+,.0f} TL** (%{getiri:+.1f})"
                 )
+
+            # K/Z kolonu için renk fonksiyonu (tablo style.applymap için)
+            def _pf_kz_renk(v):
+                if pd.isna(v) or v == 0:
+                    return ""
+                return "color: #2ca02c" if v > 0 else "color: #d62728"
 
             # --- Exposure → Tür → Varlık expander'ları ---
             exposurelar = sorted(ozet_df["Exposure"].unique())
@@ -442,16 +471,27 @@ if sayfa == "📊 Portföy":
                         tur_df = exp_df[exp_df["Tür"] == tur]
 
                         with st.expander(f"📄 {tur}  —  {pf_deger_str(tur_df, portfoy_toplam_tl)}"):
-                            goster = tur_df[["Kod", "Ad", "PB", "Exposure",
-                                             "Adet", "Değer (TL)", "Değer (USD)",
-                                             "Aracı Kurum"]].copy()
+                            # Madde 12: Maliyet (TL), K/Z (TL), Getiri % kolonları
+                            # eklendi. Exposure kolonu çıkarıldı (zaten expander'da).
+                            goster = tur_df[[
+                                "Kod", "Ad", "PB", "Adet",
+                                "Maliyet (TL)", "Değer (TL)",
+                                "Kâr/Zarar (TL)", "Getiri %",
+                                "Değer (USD)", "Aracı Kurum"
+                            ]].copy()
                             goster = goster.sort_values("Değer (TL)", ascending=False)
                             st.dataframe(
                                 goster.style.format({
-                                    "Adet"        : "{:,.4f}",
-                                    "Değer (TL)"  : "{:,.0f}",
-                                    "Değer (USD)" : "${:,.0f}",
-                                }),
+                                    "Adet"            : "{:,.4f}",
+                                    "Maliyet (TL)"    : "{:,.0f}",
+                                    "Değer (TL)"      : "{:,.0f}",
+                                    "Kâr/Zarar (TL)"  : "{:+,.0f}",
+                                    "Getiri %"        : "{:+.1f}%",
+                                    "Değer (USD)"     : "${:,.0f}",
+                                }).map(
+                                    _pf_kz_renk,
+                                    subset=["Kâr/Zarar (TL)", "Getiri %"]
+                                ),
                                 use_container_width=True, hide_index=True
                             )
 
@@ -465,11 +505,17 @@ if sayfa == "📊 Portföy":
                 viop_deger_usd = viop_deger_tl / usd_kuru_bugun
                 viop_pay       = (viop_deger_tl / portfoy_toplam_tl * 100) if portfoy_toplam_tl else 0
 
+                # Madde 12: K/Z bilgisi başlığa eklendi (diğer exposure'larla tutarlı)
+                # NOT: VIOP'ta Getiri % gösterilmez çünkü maliyet = değer - kz
+                # şeklinde matematiksel türev (gerçek bir alış maliyeti değil).
+                viop_kz = viop_ozet["kz_tl"]
+                viop_kz_emoji = "🟢" if viop_kz >= 0 else "🔴"
+
                 viop_baslik = (
                     f"📂 VIOP  —  "
                     f"**{viop_deger_tl:,.0f} TL** | "
-                    f"**${viop_deger_usd:,.0f}** | "
-                    f"Pay: **%{viop_pay:.1f}**"
+                    f"Pay **%{viop_pay:.1f}** | "
+                    f"K/Z {viop_kz_emoji} **{viop_kz:+,.0f} TL**"
                 )
 
                 with st.expander(viop_baslik):
@@ -477,8 +523,8 @@ if sayfa == "📊 Portföy":
                     with st.expander(
                         f"📄 VIOP Stratejileri  —  "
                         f"**{viop_deger_tl:,.0f} TL** | "
-                        f"**${viop_deger_usd:,.0f}** | "
-                        f"Pay: **%{viop_pay:.1f}**",
+                        f"Pay **%{viop_pay:.1f}** | "
+                        f"K/Z {viop_kz_emoji} **{viop_kz:+,.0f} TL**",
                         expanded=True,
                     ):
                         # Aracı kurum bazında satır oluştur
@@ -530,6 +576,80 @@ if sayfa == "📊 Portföy":
                                 f"ℹ️ Değer hesabı için kullanılan teminat snapshot tarihi: "
                                 f"**{viop_ozet['teminat_tarihi']}**"
                             )
+
+            # ==========================================
+            # PORTFÖY DAĞILIM GRAFİKLERİ (Madde 7+8)
+            # ==========================================
+            # Exposure bazında ve Aracı Kurum bazında iki pie chart yan yana.
+            # VIOP varsa: "Spekülatif" exposure'a + ilgili aracı kuruma eklenir.
+            import plotly.express as px
+
+            st.markdown("---")
+            st.subheader("📊 Portföy Dağılımı")
+
+            # --- Exposure verisini topla ---
+            exp_data = ozet_df.groupby("Exposure")["Değer (TL)"].sum().to_dict()
+            if viop_ozet["var_mi"]:
+                # VIOP'u "Spekülatif" exposure'a ekle (varsa) veya yeni anahtar yarat
+                exp_data["Spekülatif"] = exp_data.get("Spekülatif", 0) + viop_ozet["deger_tl"]
+
+            # --- Aracı Kurum verisini topla ---
+            ak_data = ozet_df.groupby("Aracı Kurum")["Değer (TL)"].sum().to_dict()
+            if viop_ozet["var_mi"]:
+                # VIOP'un aracı kurum dağılımını da ekle
+                for ak_v, ak_d in viop_ozet["araci_kurum_dagilim"].items():
+                    ak_data[ak_v] = ak_data.get(ak_v, 0) + ak_d["deger_tl"]
+                # Kapatılmış VIOP teminatı için ayrı satır
+                if viop_ozet.get("kapatilmis_teminat", 0) > 0 and not viop_ozet["araci_kurum_dagilim"]:
+                    ak_data["VIOP (kapatılmış)"] = (
+                        ak_data.get("VIOP (kapatılmış)", 0) +
+                        viop_ozet["kapatilmis_teminat"]
+                    )
+
+            pie_col1, pie_col2 = st.columns(2)
+
+            with pie_col1:
+                # Exposure pie — toplam portföyün exposure dağılımı
+                exp_df_pie = pd.DataFrame(
+                    {"Exposure": list(exp_data.keys()),
+                     "Değer"   : list(exp_data.values())}
+                )
+                fig_exp = px.pie(
+                    exp_df_pie,
+                    values="Değer", names="Exposure",
+                    title="Exposure Dağılımı",
+                    hole=0.35,   # donut görünümü (modern, daha okunaklı)
+                )
+                # Yüzde + label birlikte göster
+                fig_exp.update_traces(
+                    textposition="inside",
+                    textinfo="percent+label",
+                    hovertemplate="<b>%{label}</b><br>" +
+                                  "Değer: %{value:,.0f} TL<br>" +
+                                  "Pay: %{percent}<extra></extra>",
+                )
+                st.plotly_chart(fig_exp, use_container_width=True)
+
+            with pie_col2:
+                # Aracı Kurum pie — toplam portföyün broker dağılımı
+                ak_df_pie = pd.DataFrame(
+                    {"Aracı Kurum": list(ak_data.keys()),
+                     "Değer"      : list(ak_data.values())}
+                )
+                fig_ak = px.pie(
+                    ak_df_pie,
+                    values="Değer", names="Aracı Kurum",
+                    title="Aracı Kurum Dağılımı",
+                    hole=0.35,
+                )
+                fig_ak.update_traces(
+                    textposition="inside",
+                    textinfo="percent+label",
+                    hovertemplate="<b>%{label}</b><br>" +
+                                  "Değer: %{value:,.0f} TL<br>" +
+                                  "Pay: %{percent}<extra></extra>",
+                )
+                st.plotly_chart(fig_ak, use_container_width=True)
 
         else:
             st.info("Henüz işlem girilmemiş.")
@@ -871,7 +991,7 @@ bir hisse senedinin getiri oranları, yatırım büyüklüğünden etkilenmeden 
 - **TWR (TL):** Fiyat her gün o günkü döviz kuru ile TL'ye çevrilir, kur etkisi dahildir.
 - **TWR (PB):** Varlığın kendi para birimindeki (USD, EUR vb.) fiyat değişimi. TRY varlıklarda ikisi aynıdır.
 
-**Mevduat hesapları için TWR hesaplanmaz.**
+**Mevduat hesapları ve VIOP teminat hesapları için TWR hesaplanmaz.**
 """)
 
     donem = st.selectbox("Dönem seçin:", [
@@ -1136,23 +1256,30 @@ elif sayfa == "📅 Aylık Özet":
         grafik_col_tl, grafik_col_usd = st.columns(2)
 
         with grafik_col_tl:
+            # Pozitif/negatif aylar farklı renkle göster (görsel ayrım)
+            renkler_tl = ["#2ca02c" if v >= 0 else "#d62728" for v in ozet_df["Getiri"]]
             fig_tl = px.bar(
                 ozet_df,
                 x="Ay",
                 y="Getiri",
                 title=f"{yil} Yılı — Aylık Getiri (TL)",
             )
-            fig_tl.update_traces(marker_color="#1f77b4")
+            fig_tl.update_traces(marker_color=renkler_tl)
+            # Sıfır referans çizgisi (pozitif/negatif ayları görsel olarak ayırır)
+            fig_tl.add_hline(y=0, line_width=1, line_color="gray")
             st.plotly_chart(fig_tl, use_container_width=True)
 
         with grafik_col_usd:
+            renkler_usd = ["#2ca02c" if v >= 0 else "#d62728" for v in usd_ozet_df["Getiri"]]
             fig_usd = px.bar(
                 usd_ozet_df,
                 x="Ay",
                 y="Getiri",
                 title=f"{yil} Yılı — Aylık Getiri (USD)",
             )
-            fig_usd.update_traces(marker_color="#2ca02c")
+            fig_usd.update_traces(marker_color=renkler_usd)
+            # Sıfır referans çizgisi
+            fig_usd.add_hline(y=0, line_width=1, line_color="gray")
             st.plotly_chart(fig_usd, use_container_width=True)
 
         # ==========================================
@@ -1568,6 +1695,13 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
             # --- TL / USD sekmeleri ---
             dk_tab_tl, dk_tab_usd = st.tabs(["🇹🇷 TL Bazında", "🇺🇸 USD Bazında"])
 
+            # Pozitif yeşil / negatif kırmızı renklendirme helper'ı
+            # (Fark ve Fark % kolonlarına uygulanır)
+            def _dk_fark_renk(v):
+                if pd.isna(v) or v == 0:
+                    return ""
+                return "color: #2ca02c" if v > 0 else "color: #d62728"
+
             with dk_tab_tl:
                 st.dataframe(
                     dk_grup.style.format({
@@ -1575,7 +1709,7 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
                         bit_etiket: "{:,.0f}",
                         "Fark": "{:+,.0f}",
                         "Fark %": "{:+.1f}%",
-                    }, na_rep="—"),
+                    }, na_rep="—").map(_dk_fark_renk, subset=["Fark", "Fark %"]),
                     use_container_width=True, hide_index=True
                 )
 
@@ -1586,7 +1720,7 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
                         bit_etiket: "${:,.0f}",
                         "Fark": "${:+,.0f}",
                         "Fark %": "{:+.1f}%",
-                    }, na_rep="—"),
+                    }, na_rep="—").map(_dk_fark_renk, subset=["Fark", "Fark %"]),
                     use_container_width=True, hide_index=True
                 )
 
@@ -1618,7 +1752,7 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
                             bit_etiket: "{:,.0f}",
                             "Fark": "{:+,.0f}",
                             "Fark %": "{:+.1f}%",
-                        }, na_rep="—"),
+                        }, na_rep="—").map(_dk_fark_renk, subset=["Fark", "Fark %"]),
                         use_container_width=True, hide_index=True
                     )
 
@@ -1629,7 +1763,7 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
                             bit_etiket: "${:,.0f}",
                             "Fark": "${:+,.0f}",
                             "Fark %": "{:+.1f}%",
-                        }, na_rep="—"),
+                        }, na_rep="—").map(_dk_fark_renk, subset=["Fark", "Fark %"]),
                         use_container_width=True, hide_index=True
                     )
 
@@ -2235,6 +2369,33 @@ elif sayfa == "⚡ VIOP Stratejileri":
         st.markdown("---")
 
         # ==========================================
+        # DAYANAK FİLTRESİ (yeni)
+        # ==========================================
+        # NOT: "Açık/Kapalı" filtresi zaten alt sekmelerde var. Ek olarak
+        # dayanak bazlı filtre kullanıcının çoklu sözleşme yönettiği
+        # senaryoda hayat kurtarır (XU030 stratejilerini USDTRY'den ayırma).
+        tum_dayanaklar = sorted(set(
+            m["strat"]["dayanak"] for m in strateji_meta
+            if not pd.isna(m["strat"]["dayanak"]) and m["strat"]["dayanak"]
+        ))
+        if tum_dayanaklar:
+            dayanak_secenekleri = ["Tümü"] + tum_dayanaklar
+            secilen_dayanak = st.radio(
+                "🎯 Dayanak filtresi:",
+                dayanak_secenekleri,
+                horizontal=True,
+                key="viop_dayanak_filtre",
+            )
+            if secilen_dayanak != "Tümü":
+                # Listeleri filtrele
+                acik_listesi          = [m for m in acik_listesi
+                                         if m["strat"]["dayanak"] == secilen_dayanak]
+                kapali_listesi        = [m for m in kapali_listesi
+                                         if m["strat"]["dayanak"] == secilen_dayanak]
+                vadesi_gecmis_listesi = [m for m in vadesi_gecmis_listesi
+                                         if m["strat"]["dayanak"] == secilen_dayanak]
+
+        # ==========================================
         # 3) ÜÇ SEKME: AÇIK / KAPALI / VADESİ GEÇMİŞ
         # ==========================================
         tab_acik, tab_kapali, tab_vadesi = st.tabs([
@@ -2428,6 +2589,203 @@ elif sayfa == "⚡ VIOP Stratejileri":
                         + "\n".join(f"• `{k}`" for k in eksik_kodlar)
                     )
 
+                # ==========================================
+                # BLOK C — Vade Payoff Diagram (Madde 11)
+                # ==========================================
+                # Stratejinin vade tarihindeki payoff grafiği:
+                #   X ekseni = dayanak fiyatı, Y ekseni = P&L (TL)
+                # Her açık bacak ince renkli çizgi, toplam payoff kalın siyah çizgi.
+                # Sıfır referansı + strike işaretleri + breakeven annotation.
+                #
+                # Kapalı stratejilerde (kapali sekmesi) payoff anlamsız — gösterilmiyor.
+                # Açık bacağı olmayan stratejilerde de gösterilmiyor.
+                #
+                # NOT: Bu grafik tüm bacakların aynı anda vadeye taşınacağı
+                # varsayımı altındadır. Farklı vadeli bacaklar varsa bu bir
+                # idealizasyondur — kullanıcıya altta uyarı verilir.
+                if sekme_tipi != "kapali":
+                    # Sadece açık bacakları al (vade payoff için)
+                    acik_bacaklar_df = bacak_df[
+                        bacak_df["kapanis_fiyat"].isna()
+                    ].copy()
+
+                    if not acik_bacaklar_df.empty:
+                        st.markdown("##### 📊 Vade Payoff Diagramı")
+
+                        # --- Fiyat aralığını belirle ---
+                        # Strike fiyatları + future açılış fiyatları → min/max
+                        # X aralığı: bu aralığın ±%25 padding'i
+                        referans_fiyatlar = []
+                        for _, b in acik_bacaklar_df.iterrows():
+                            if b["enstruman_tipi"] == "Opsiyon":
+                                if not pd.isna(b["strike"]):
+                                    referans_fiyatlar.append(float(b["strike"]))
+                            else:  # Future
+                                referans_fiyatlar.append(float(b["acilis_fiyat"]))
+
+                        if referans_fiyatlar:
+                            min_ref = min(referans_fiyatlar)
+                            max_ref = max(referans_fiyatlar)
+                            # Tek bir nokta ise yapay aralık aç
+                            if min_ref == max_ref:
+                                min_ref = min_ref * 0.75
+                                max_ref = max_ref * 1.25
+                            else:
+                                aralik = max_ref - min_ref
+                                min_ref = min_ref - aralik * 0.5
+                                max_ref = max_ref + aralik * 0.5
+
+                            # 200 nokta — çizgi pürüzsüz görünür
+                            import numpy as np
+                            fiyat_dizi = np.linspace(min_ref, max_ref, 200)
+
+                            # --- Her bacak için vade payoff'unu hesapla ---
+                            # Vade kontrat fiyatı:
+                            #   Opsiyon Call: max(0, S - K)
+                            #   Opsiyon Put : max(0, K - S)
+                            #   Future       : S (dayanak fiyatı)
+                            # Bacak P&L: (vade_kontrat - acilis_fiyat) × adet × carpan × yon
+                            #   yon: Long=+1, Short=-1
+                            #
+                            # NOT (defansif kontrol): Veritabanında opsiyon_tipi alanı
+                            # "Call"/"Put" (tam kelime) veya "C"/"P" (kısa) şeklinde
+                            # saklanmış olabilir; yon alanı da "Long"/"Short" veya
+                            # "L"/"S" varyasyonlarına sahip olabilir. Aşağıdaki
+                            # karşılaştırmalar büyük/küçük harf ve uzunluk farkına
+                            # dayanıklıdır.
+                            bacak_payoff_dict = {}   # {sozlesme: [pnl_dizi]}
+                            for _, b in acik_bacaklar_df.iterrows():
+                                acilis    = float(b["acilis_fiyat"])
+                                adet      = float(b["adet"])
+                                carpan    = float(b["kontrat_carpani"])
+
+                                # Yön (defansif): "Long"/"L"/"long" gibi varyasyonlar
+                                # için ilk harfi büyük L ise +1, aksi halde -1.
+                                yon_str = str(b["yon"]).strip().upper()
+                                yon = 1 if yon_str.startswith("L") else -1
+
+                                enstruman = b["enstruman_tipi"]
+
+                                if enstruman == "Opsiyon":
+                                    K = float(b["strike"])
+                                    # Opsiyon tipi (defansif): "Call"/"C"/"call" hep
+                                    # Call olarak algılanır; diğer her şey Put kabul
+                                    # edilir (Put'ın "Put"/"P" varyasyonları).
+                                    op_tip = str(b["opsiyon_tipi"]).strip().upper()
+                                    if op_tip in ("C", "CALL"):
+                                        vade_fiyat = np.maximum(0, fiyat_dizi - K)   # Call
+                                    else:  # "P", "PUT" veya diğer (Put kabul)
+                                        vade_fiyat = np.maximum(0, K - fiyat_dizi)   # Put
+                                else:  # Future
+                                    vade_fiyat = fiyat_dizi.copy()
+
+                                bacak_pnl_dizi = (vade_fiyat - acilis) * adet * carpan * yon
+                                bacak_payoff_dict[b["sozlesme_kodu"]] = bacak_pnl_dizi
+
+                            # Toplam payoff (bacakların toplamı)
+                            toplam_payoff = np.zeros_like(fiyat_dizi)
+                            for _, dizi in bacak_payoff_dict.items():
+                                toplam_payoff = toplam_payoff + dizi
+
+                            # --- Breakeven noktaları (toplam_payoff = 0) ---
+                            # İşaret değişimi olan noktaları bul
+                            breakeven_noktalari = []
+                            for i in range(len(toplam_payoff) - 1):
+                                if toplam_payoff[i] * toplam_payoff[i+1] < 0:
+                                    # Doğrusal interpolasyon ile geçiş noktasını bul
+                                    f1, f2 = fiyat_dizi[i], fiyat_dizi[i+1]
+                                    p1, p2 = toplam_payoff[i], toplam_payoff[i+1]
+                                    be = f1 - p1 * (f2 - f1) / (p2 - p1)
+                                    breakeven_noktalari.append(be)
+
+                            # --- Plotly grafik ---
+                            import plotly.graph_objects as go
+                            fig_payoff = go.Figure()
+
+                            # Her bacak için ince çizgi
+                            renk_paleti = [
+                                "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                                "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+                            ]
+                            for i, (sozlesme, dizi) in enumerate(bacak_payoff_dict.items()):
+                                fig_payoff.add_trace(go.Scatter(
+                                    x=fiyat_dizi, y=dizi,
+                                    mode="lines",
+                                    name=sozlesme,
+                                    line=dict(width=1.5, color=renk_paleti[i % len(renk_paleti)]),
+                                    hovertemplate=(
+                                        "<b>" + sozlesme + "</b><br>"
+                                        "Dayanak: %{x:,.2f}<br>"
+                                        "P&L: %{y:+,.0f} TL<extra></extra>"
+                                    ),
+                                ))
+
+                            # Toplam payoff — kalın siyah çizgi
+                            fig_payoff.add_trace(go.Scatter(
+                                x=fiyat_dizi, y=toplam_payoff,
+                                mode="lines",
+                                name="Toplam",
+                                line=dict(width=3, color="black"),
+                                hovertemplate=(
+                                    "<b>Toplam Strateji</b><br>"
+                                    "Dayanak: %{x:,.2f}<br>"
+                                    "P&L: %{y:+,.0f} TL<extra></extra>"
+                                ),
+                            ))
+
+                            # Sıfır referans çizgisi
+                            fig_payoff.add_hline(y=0, line_width=1, line_color="gray",
+                                                 line_dash="dash")
+
+                            # Her strike için dikey rehber çizgi (opsiyon bacakları)
+                            for _, b in acik_bacaklar_df.iterrows():
+                                if b["enstruman_tipi"] == "Opsiyon" and not pd.isna(b["strike"]):
+                                    K = float(b["strike"])
+                                    fig_payoff.add_vline(
+                                        x=K, line_width=1, line_color="lightgray",
+                                        line_dash="dot",
+                                    )
+
+                            # Breakeven annotation
+                            for be in breakeven_noktalari:
+                                fig_payoff.add_annotation(
+                                    x=be, y=0,
+                                    text=f"BE: {be:,.0f}",
+                                    showarrow=True,
+                                    arrowhead=2,
+                                    arrowcolor="#d62728",
+                                    bgcolor="#fff8dc",
+                                    bordercolor="#d62728",
+                                    font=dict(size=10, color="#d62728"),
+                                )
+
+                            fig_payoff.update_layout(
+                                title=f"Vade Payoff — {strat['ad']}",
+                                xaxis_title="Dayanak Fiyatı",
+                                yaxis_title="P&L (TL)",
+                                hovermode="x unified",
+                                height=400,
+                            )
+
+                            st.plotly_chart(fig_payoff, use_container_width=True)
+
+                            # --- Açıklama notu ---
+                            if breakeven_noktalari:
+                                be_str = " ve ".join([f"**{be:,.0f}**" for be in breakeven_noktalari])
+                                st.caption(
+                                    f"🎯 **Başabaş (Breakeven) noktası:** Dayanak fiyatı "
+                                    f"{be_str} olduğunda toplam strateji P&L'i sıfırdır."
+                                )
+
+                            # Farklı vadeli bacaklar uyarısı
+                            tum_vadeler = acik_bacaklar_df["vade"].dropna().unique()
+                            if len(tum_vadeler) > 1:
+                                st.caption(
+                                    "ℹ️ Bu stratejide farklı vadelerde bacak var. "
+                                    "Grafik, tüm bacakların aynı tarihte kapatıldığı "
+                                    "varsayımı altındadır."
+                                )
+
         # --- Sekme içerikleri ---
         with tab_acik:
             if not acik_listesi:
@@ -2455,32 +2813,32 @@ elif sayfa == "⚡ VIOP Stratejileri":
         # ==========================================
         # 4) TEMİNAT SNAPSHOT KARTI (Sayfa Sonu)
         # ==========================================
+        # Madde 10: Liste uzun olabildiği için expander içine alındı
         st.markdown("---")
-        st.subheader("🔒 Teminat Geçmişi")
 
-        teminat_gecmis_df = sql_oku("""
-            SELECT tarih, teminat_tutari, aciklama
-            FROM viop_teminat_anlik
-            ORDER BY tarih DESC LIMIT 10
-        """, baglanti)
+        with st.expander("🔒 Teminat Geçmişi"):
+            teminat_gecmis_df = sql_oku("""
+                SELECT tarih, teminat_tutari, aciklama
+                FROM viop_teminat_anlik
+                ORDER BY tarih DESC LIMIT 10
+            """, baglanti)
 
-        if teminat_gecmis_df.empty:
-            st.info("Henüz teminat snapshot'ı kaydedilmemiş. "
-                    "Veri girişi Aşama 5.3'te eklenecek.")
-        else:
-            # NaN açıklamaları "—" ile değiştir
-            teminat_gecmis_df["aciklama"] = teminat_gecmis_df["aciklama"].fillna("—")
+            if teminat_gecmis_df.empty:
+                st.info("Henüz teminat snapshot'ı kaydedilmemiş.")
+            else:
+                # NaN açıklamaları "—" ile değiştir
+                teminat_gecmis_df["aciklama"] = teminat_gecmis_df["aciklama"].fillna("—")
 
-            st.dataframe(
-                teminat_gecmis_df.rename(columns={
-                    "tarih"          : "Tarih",
-                    "teminat_tutari" : "Tutar (TL)",
-                    "aciklama"       : "Açıklama",
-                }).style.format({
-                    "Tutar (TL)": "{:,.0f}",
-                }),
-                use_container_width=True, hide_index=True
-            )
+                st.dataframe(
+                    teminat_gecmis_df.rename(columns={
+                        "tarih"          : "Tarih",
+                        "teminat_tutari" : "Tutar (TL)",
+                        "aciklama"       : "Açıklama",
+                    }).style.format({
+                        "Tutar (TL)": "{:,.0f}",
+                    }),
+                    use_container_width=True, hide_index=True
+                )
 
 # ==========================================
 # SAYFA 4: VARLIK EKLE
