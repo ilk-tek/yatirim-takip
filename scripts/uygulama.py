@@ -26,6 +26,8 @@ from hesaplamalar import (
     viop_sozlesme_parse, viop_carpan_tahmin,
     # VIOP portföy entegrasyonu (Aşama 5.4.A)
     viop_portfoy_degeri,
+    # VIOP yıllık tarama (Aşama 5.4.B — Aylık Özet stale uyarı bandı için)
+    viop_yil_uyari_tara,
 )
 from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_cek, altin_fiyatlari_cek, tum_fiyatlari_cek
 from tefas_import import tefas_import
@@ -979,6 +981,24 @@ elif sayfa == "📅 Aylık Özet":
 
     yil = st.selectbox("Yıl seçin:", [2024, 2025, 2026, 2027], index=2)
 
+    # ==========================================
+    # VIOP STALE UYARI BANDI (Aşama 5.4.B)
+    # ==========================================
+    # Seçilen yıl için her ay sonunda VIOP teminat snapshot durumunu tara.
+    # 7+ gün eski snapshot kullanılan aylar varsa kullanıcıyı uyar.
+    # Snapshot disiplinli kullanıcıda bu liste boş gelir, uyarı gösterilmez.
+    viop_uyari_listesi = viop_yil_uyari_tara(yil)
+    if viop_uyari_listesi:
+        ay_adlari = ", ".join([u["ay_adi"] for u in viop_uyari_listesi])
+        st.warning(
+            f"⚠️ **VIOP teminat snapshot uyarısı:** {yil} yılında "
+            f"**{len(viop_uyari_listesi)} ay** için snapshot 7+ gün eski "
+            f"({ay_adlari}). Bu aylarda VIOP değer hesabı önceki bir "
+            f"snapshot üzerinden yapıldı; K/Z ise sorgu tarihindeki "
+            f"fiyatlardan hesaplandı. Detay için **💱 VIOP Fiyat Güncelle** "
+            f"sayfasından eksik snapshot'ları kaydedin."
+        )
+
     st.markdown("---")
 
     # ==========================================
@@ -1449,6 +1469,28 @@ elif sayfa == "🔄 Dönemsel Karşılaştırma":
     else:
         bas_str = str(dk_baslangic)
         bit_str = str(dk_bitis)
+
+        # ==========================================
+        # VIOP STALE UYARI BANDI (Aşama 5.4.B)
+        # ==========================================
+        # Başlangıç ve bitiş tarihleri için VIOP snapshot durumunu kontrol et.
+        # 7+ gün eski snapshot kullanılan tarihlerde uyarı bandı gösterilir.
+        viop_bas_dk = viop_portfoy_degeri(tarih=bas_str)
+        viop_bit_dk = viop_portfoy_degeri(tarih=bit_str)
+        dk_uyari_satirlari = []
+        if viop_bas_dk.get("uyari"):
+            dk_uyari_satirlari.append(
+                f"• **Başlangıç ({bas_str}):** {viop_bas_dk['uyari']}"
+            )
+        if viop_bit_dk.get("uyari"):
+            dk_uyari_satirlari.append(
+                f"• **Bitiş ({bit_str}):** {viop_bit_dk['uyari']}"
+            )
+        if dk_uyari_satirlari:
+            st.warning(
+                "⚠️ **VIOP teminat snapshot uyarısı:**\n\n"
+                + "\n\n".join(dk_uyari_satirlari)
+            )
 
         with st.spinner("Hesaplanıyor..."):
             dk_df = donemsel_karsilastirma_hesapla(bas_str, bit_str)
@@ -4228,6 +4270,88 @@ elif sayfa == "💱 VIOP Fiyat Güncelle":
             }).style.format({"Tutar (TL)": "{:,.0f}"}),
             use_container_width=True, hide_index=True,
         )
+
+        # ==========================================
+        # SNAPSHOT SİLME (Aşama 5.4.B sonrası ek)
+        # ==========================================
+        # Yanlış girilmiş veya deneme amaçlı snapshot'ları kaldırmak için.
+        # Mevcut bacak silme kalıbıyla aynı: önce "🗑️ Sil" butonu, sonra
+        # "✅ Silmeyi Onayla" ile iki adımlı onay.
+        #
+        # NOT: Snapshot silmek = "o tarihte hesabımda şu kadar TL vardı"
+        # bilgisini kayıttan çıkarmak. viop_portfoy_degeri ondan sonra
+        # "≤ sorgu_tarihi son snapshot" mantığıyla bir önceki snapshot'a
+        # düşer. Eğer hiç snapshot kalmazsa o tarihte VIOP değeri 0 olur.
+        st.markdown("---")
+        with st.expander("🗑️ Snapshot Sil"):
+            st.caption(
+                "Yanlış girilmiş veya deneme snapshot'ı kaldırmak için kullanın. "
+                "Snapshot silindiğinde, o tarihten sonraki sorgularda otomatik "
+                "olarak bir önceki snapshot kullanılır."
+            )
+
+            # Silinecek tarih seçici — tüm snapshot tarihlerini listele
+            tum_snapshot_tarihleri_fg = sql_oku("""
+                SELECT tarih, teminat_tutari FROM viop_teminat_anlik
+                ORDER BY tarih DESC
+            """, baglanti)
+
+            if tum_snapshot_tarihleri_fg.empty:
+                st.info("Silinecek snapshot yok.")
+            else:
+                # Selectbox seçenekleri: "2025-08-15 — 50,000 TL" formatında
+                tarih_secenekleri_fg = {
+                    f"{r['tarih']} — {r['teminat_tutari']:,.0f} TL": r["tarih"]
+                    for _, r in tum_snapshot_tarihleri_fg.iterrows()
+                }
+
+                secilen_etiket_fg = st.selectbox(
+                    "Silinecek snapshot:",
+                    list(tarih_secenekleri_fg.keys()),
+                    key="viop_fg_snapshot_sil_secim",
+                )
+                secilen_tarih_sil_fg = tarih_secenekleri_fg[secilen_etiket_fg]
+
+                # İki adımlı onay (mevcut bacak silme ile aynı kalıp)
+                sil_onay_key_fg = "viop_fg_snapshot_sil_onay"
+
+                if st.button("🗑️ Sil",
+                             key="viop_fg_snapshot_sil_btn"):
+                    st.session_state[sil_onay_key_fg] = secilen_tarih_sil_fg
+
+                # Onay aşaması — sadece o anda seçili tarih için göster
+                # (kullanıcı seçimi değiştirirse onay sıfırlansın)
+                if st.session_state.get(sil_onay_key_fg) == secilen_tarih_sil_fg:
+                    st.warning(
+                        f"⚠️ **{secilen_tarih_sil_fg}** tarihindeki snapshot "
+                        f"silinecek. Bu işlem geri alınamaz."
+                    )
+                    if st.button("✅ Silmeyi Onayla",
+                                 key="viop_fg_snapshot_sil_onay_btn",
+                                 type="primary"):
+                        # Turso connection reset (memory: stream timeout fix)
+                        import db as _db_snp
+                        _db_snp._baglanti = None
+                        baglanti_snp = veritabani_baglan()
+                        cursor_snp   = baglanti_snp.cursor()
+
+                        cursor_snp.execute(
+                            "DELETE FROM viop_teminat_anlik WHERE tarih = ?",
+                            (secilen_tarih_sil_fg,),
+                        )
+                        baglanti_snp.commit()
+                        senkronize_et()
+                        _db_snp._baglanti = None
+
+                        # Onay state'ini temizle
+                        del st.session_state[sil_onay_key_fg]
+
+                        st.success(
+                            f"✅ Snapshot silindi: {secilen_tarih_sil_fg}"
+                        )
+                        import time
+                        time.sleep(1.5)
+                        st.rerun()
 
 # ==========================================
 # SAYFA 6: İŞLEM EKLE

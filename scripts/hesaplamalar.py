@@ -444,6 +444,31 @@ def aylik_portfoy_ozeti(yil):
         ay_basi_deger = sum(varlik_deger(v, ay_basi) for _, v in varliklar.iterrows())
         ay_sonu_deger = sum(varlik_deger(v, ay_sonu) for _, v in varliklar.iterrows())
 
+        # --- VIOP entegrasyonu (Aşama 5.4.B) ---
+        # Her ay başı ve ay sonu için VIOP teminat değeri toplama eklenir.
+        # viop_portfoy_degeri "tarih <= X" mantığıyla o tarihte geçerli olan
+        # son snapshot'ı kullanır. Dış akış kavramına dokunmaz — VIOP teminat
+        # hareketleri portföy içi transfer sayılır, "Getiri" hesabı doğru
+        # çalışır (snapshot dalgalanması = aylık unrealized P&L değişimi).
+        #
+        # NOT: Varlık sorguları "tarih < ay_basi/sonu" kullanıyor (bir önceki
+        # gün sonu = o günün portföy değeri). viop_portfoy_degeri "tarih <= ?"
+        # kullandığı için, semantik tutarlılık için VIOP'a bir gün geriye
+        # alınmış tarihi geçiyoruz. Böylece 2026-02-01 ay sonu için varlık
+        # değeri 2026-01-31'e ait fiyatlardan, VIOP teminat değeri de
+        # 2026-01-31 (veya ≤ bu tarih son snapshot) üzerinden hesaplanır.
+        viop_kesim_basi = (
+            datetime.strptime(ay_basi, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        viop_kesim_sonu = (
+            datetime.strptime(ay_sonu, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+        viop_basi = viop_portfoy_degeri(tarih=viop_kesim_basi)
+        viop_sonu = viop_portfoy_degeri(tarih=viop_kesim_sonu)
+        ay_basi_deger += viop_basi["deger_tl"]
+        ay_sonu_deger += viop_sonu["deger_tl"]
+
         # Portföy seviyesinde dış giriş/çıkış
         dis_giris = 0
         dis_cikis = 0
@@ -561,11 +586,52 @@ def aylik_dagilim_hesapla(yil):
         if any(d > 0 for d in ay_degerleri):
             sonuclar.append(satir)
 
+    # --- VIOP satırı ekle (Aşama 5.4.B) ---
+    # Matriste tek satır olarak gösterilir: "Spekülatif — VIOP Stratejileri".
+    # Her ay sonu için viop_portfoy_degeri(tarih=ay_sonu) çağrılır;
+    # döndürülen deger_tl, o ay sonundaki teminat snapshot tutarıdır.
+    # Hiç değer yoksa satır eklenmez (boş matris kirletilmez).
+    #
+    # NOT: aylik_portfoy_ozeti ile semantik tutarlılık için VIOP'a bir gün
+    # geriye alınmış tarihi geçiyoruz (bkz. aylik_portfoy_ozeti'ndeki NOT).
+    viop_satir = {
+        "Kod"      : "VIOP",
+        "Tür"      : "VIOP Stratejileri",
+        "Exposure" : "Spekülatif",
+        "PB"       : "TRY",
+    }
+    viop_var_mi = False
+    for ay in range(1, 13):
+        if ay == 12:
+            ay_sonu = f"{yil+1}-01-01"
+        else:
+            ay_sonu = f"{yil}-{str(ay+1).zfill(2)}-01"
+
+        viop_kesim = (
+            datetime.strptime(ay_sonu, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        viop_sonuc = viop_portfoy_degeri(tarih=viop_kesim)
+        deger_v = viop_sonuc["deger_tl"]
+        viop_satir[AY_ISIMLERI[ay - 1]] = round(deger_v, 2)
+        if deger_v > 0:
+            viop_var_mi = True
+
+    if viop_var_mi:
+        sonuclar.append(viop_satir)
+
     return pd.DataFrame(sonuclar) if sonuclar else pd.DataFrame()
 
 
 # ==========================================
 # DÖNEMSEL KARŞILAŞTIRMA
+# ==========================================
+# İki tarih arasındaki varlık bazında TL değer değişimini hesaplar.
+# Hesaplama mantığı aylik_dagilim_hesapla ile birebir aynı:
+#   değer = son_fiyat × net_adet × kur
+# Tek fark: ay sonu yerine kullanıcının seçtiği iki tarih kullanılır.
+# tarih < ? yerine tarih <= ? kullanılır (gün sonu değeri için).
+# Aşama 5.4.B'de sonuca VIOP satırı eklenir.
+# ==========================================
 # ==========================================
 # İki tarih arasındaki varlık bazında TL değer değişimini hesaplar.
 # Hesaplama mantığı aylik_dagilim_hesapla ile birebir aynı:
@@ -662,6 +728,24 @@ def donemsel_karsilastirma_hesapla(baslangic_tarih, bitis_tarih):
                 "Başlangıç" : bas_deger,
                 "Bitiş"     : bit_deger,
             })
+
+    # --- VIOP satırı ekle (Aşama 5.4.B) ---
+    # Tek satır olarak: "Spekülatif — VIOP Stratejileri".
+    # Başlangıç ve bitiş için viop_portfoy_degeri(tarih=...) çağrılır;
+    # döndürülen deger_tl, o tarihte geçerli olan son snapshot tutarıdır.
+    # İki tarihte de değer 0 ise satır eklenmez.
+    viop_bas = viop_portfoy_degeri(tarih=baslangic_tarih)
+    viop_bit = viop_portfoy_degeri(tarih=bitis_tarih)
+
+    if viop_bas["deger_tl"] > 0 or viop_bit["deger_tl"] > 0:
+        sonuclar.append({
+            "Kod"       : "VIOP",
+            "Tür"       : "VIOP Stratejileri",
+            "Exposure"  : "Spekülatif",
+            "PB"        : "TRY",
+            "Başlangıç" : round(viop_bas["deger_tl"], 2),
+            "Bitiş"     : round(viop_bit["deger_tl"], 2),
+        })
 
     return pd.DataFrame(sonuclar) if sonuclar else pd.DataFrame()
 
@@ -905,32 +989,46 @@ def viop_bacak_pnl(bacak, guncel_fiyat):
     return round(pnl, 2)
 
 
-def viop_strateji_pnl(strateji_id):
+def viop_strateji_pnl(strateji_id, tarih=None):
     """
     Bir stratejinin TÜM bacaklarını gezip toplam P&L'ini hesaplar.
 
-    Mantık (her bacak için):
-      - Kapalı bacak (kapanis_fiyat doluysa): realized P&L (kapanış fiyatı üzerinden)
-      - Açık bacak (kapanis_fiyat NULL ise):  unrealized P&L (son uzlaşma fiyatı üzerinden)
-
-    Açık bacakların son fiyatı viop_fiyat_gecmisi'nden MAX(tarih) ile çekilir.
-    Bir bacağa hiç fiyat girilmediyse, o bacak P&L hesabına dahil edilmez
-    ama eksik_fiyat listesinde döner (UI uyarı için).
-
-    Parametre:
+    Parametreler:
       strateji_id : int
+      tarih       : str "YYYY-MM-DD" veya None.
+                    None  → bugün (mevcut/canlı davranış).
+                    Aksi  → o tarihteki anlık P&L (geriye dönük raporlama).
+
+    Sorgu tarihi bazlı mantık (her bacak için):
+      - Bacak o tarihte henüz açılmamışsa (acilis_tarih > sorgu_tarihi):
+          hesaba dahil edilmez.
+      - Bacak o tarihte zaten kapanmışsa (kapanis_tarih <= sorgu_tarihi):
+          realized P&L → kapanış fiyatı kullanılır.
+      - Bacak o tarihte hâlâ açıksa (kapanis_tarih NULL ya da > sorgu_tarihi):
+          unrealized P&L → "tarih <= sorgu_tarihi" kıstasıyla son uzlaşma
+          fiyatı kullanılır (MAX(tarih) deseni).
+
+    Bir bacağa sorgu tarihine kadar hiç fiyat girilmediyse, o bacak P&L
+    hesabına dahil edilmez ama eksik_fiyat listesinde döner (UI uyarı için).
 
     Dönen dict:
       toplam_pnl  : float — TL cinsinden net P&L
       detaylar    : list of dict — bacak bazında P&L detayı
       eksik_fiyat : list of int — fiyat bulunamayan bacak ID'leri
     """
+    # Sorgu tarihi: verilmemişse bugün (canlı mod)
+    if tarih is None:
+        tarih = date.today().strftime("%Y-%m-%d")
+
     baglanti = veritabani_baglan()
 
-    bacaklar = sql_oku(f"""
-        SELECT * FROM viop_bacaklar
-        WHERE strateji_id = {int(strateji_id)}
-    """, baglanti)
+    # Sadece sorgu tarihinde var olan bacakları çek
+    # (henüz açılmamış bacaklar dışlanır)
+    bacaklar = sql_oku(
+        "SELECT * FROM viop_bacaklar "
+        "WHERE strateji_id = ? AND acilis_tarih <= ?",
+        baglanti, params=(int(strateji_id), tarih),
+    )
 
     if bacaklar.empty:
         return {"toplam_pnl": 0.0, "detaylar": [], "eksik_fiyat": []}
@@ -940,21 +1038,35 @@ def viop_strateji_pnl(strateji_id):
     eksik = []
 
     for _, bacak in bacaklar.iterrows():
-        # NULL/NaN kontrolü: libsql NULL'u NaN olarak döndürür, pd.isna() ile kontrol
+        # NULL/NaN kontrolü: libsql NULL'u NaN olarak döndürür
         kapanis_fiyat = bacak["kapanis_fiyat"]
-        bacak_kapali = not (kapanis_fiyat is None or pd.isna(kapanis_fiyat))
+        kapanis_tarih = bacak["kapanis_tarih"]
 
-        if bacak_kapali:
+        kapanis_fiyat_var = not (kapanis_fiyat is None or pd.isna(kapanis_fiyat))
+        kapanis_tarih_var = not (kapanis_tarih is None or pd.isna(kapanis_tarih))
+
+        # Bacak SORGU TARİHİNDE kapalı sayılır mı?
+        # Şartlar: hem kapanış fiyatı dolu, hem kapanış tarihi sorgu
+        # tarihinden büyük değil (sonradan kapanmamış).
+        sorgu_tarihinde_kapali = (
+            kapanis_fiyat_var
+            and kapanis_tarih_var
+            and str(kapanis_tarih) <= tarih
+        )
+
+        if sorgu_tarihinde_kapali:
             # Realized P&L: kapanış fiyatı kullanılır
             guncel_fiyat = float(kapanis_fiyat)
             durum = "kapali"
         else:
-            # Unrealized P&L: son uzlaşma fiyatı çekilir
-            fiyat_df = sql_oku("""
-                SELECT fiyat FROM viop_fiyat_gecmisi
-                WHERE sozlesme_kodu = ?
-                ORDER BY tarih DESC LIMIT 1
-            """, baglanti, params=(bacak["sozlesme_kodu"],))
+            # Unrealized P&L: sorgu tarihine kadarki son uzlaşma fiyatı
+            # (MAX(tarih) WHERE tarih <= sorgu_tarihi deseni)
+            fiyat_df = sql_oku(
+                "SELECT fiyat FROM viop_fiyat_gecmisi "
+                "WHERE sozlesme_kodu = ? AND tarih <= ? "
+                "ORDER BY tarih DESC LIMIT 1",
+                baglanti, params=(bacak["sozlesme_kodu"], tarih),
+            )
 
             if fiyat_df.empty:
                 eksik.append(int(bacak["id"]))
@@ -981,35 +1093,64 @@ def viop_strateji_pnl(strateji_id):
     }
 
 
-def viop_strateji_durumu(strateji_id):
+def viop_strateji_durumu(strateji_id, tarih=None):
     """
     Bacakların kapanış durumuna bakarak stratejinin CANLI durumunu türetir.
 
+    Parametreler:
+      strateji_id : int
+      tarih       : str "YYYY-MM-DD" veya None.
+                    None  → bugün (mevcut/canlı davranış).
+                    Aksi  → o tarih itibariyle strateji durumu.
+
+    Sorgu tarihi bazlı mantık:
+      - O tarihte henüz açılmamış bacaklar (acilis_tarih > sorgu_tarihi)
+        hesaba katılmaz.
+      - Açık bacak (o tarihte): kapanis_tarih NULL VEYA kapanis_tarih > sorgu_tarihi
+      - Kapalı bacak (o tarihte): kapanis_tarih <= sorgu_tarihi
+
     Dönen:
-      "Açık"        : Tüm bacaklar açık (kapanis_tarih hepsi NULL)
+      "Açık"        : Tüm (sorgu tarihinde mevcut) bacaklar açık
       "Kısmi Açık"  : Bir kısmı açık, bir kısmı kapalı
       "Kapalı"      : Tüm bacaklar kapalı
-      "Bacak Yok"   : Stratejiye hiç bacak eklenmemiş (uç durum)
+      "Bacak Yok"   : Stratejinin sorgu tarihinde hiç bacağı yok (uç durum)
 
     Hibrit yaklaşım (Aşama 1'de kararlaştırıldı):
       - Bu fonksiyon canlı türetir (kaynak doğru)
       - viop_stratejiler.durum alanı UI tarafında cache olarak güncellenir
       - Tutarsızlık olursa bu fonksiyon doğruyu söyler
     """
+    if tarih is None:
+        tarih = date.today().strftime("%Y-%m-%d")
+
     baglanti = veritabani_baglan()
 
-    bacaklar = sql_oku(f"""
-        SELECT kapanis_tarih FROM viop_bacaklar
-        WHERE strateji_id = {int(strateji_id)}
-    """, baglanti)
+    # Sorgu tarihinde mevcut olan bacakları çek (henüz açılmayanlar dışarıda)
+    bacaklar = sql_oku(
+        "SELECT kapanis_tarih FROM viop_bacaklar "
+        "WHERE strateji_id = ? AND acilis_tarih <= ?",
+        baglanti, params=(int(strateji_id), tarih),
+    )
 
     if bacaklar.empty:
         return "Bacak Yok"
 
-    # NULL kontrolü: libsql NULL'u NaN olarak döndürür
-    # pd.isna() ile hem None hem NaN yakalanır
-    acik_sayisi   = int(bacaklar["kapanis_tarih"].isna().sum())
-    kapali_sayisi = int((~bacaklar["kapanis_tarih"].isna()).sum())
+    # Her bacak için sorgu tarihinde "açık" mı "kapalı" mı?
+    # NULL kontrolü: libsql NULL'u NaN olarak döndürür, pd.isna() ile yakala
+    acik_sayisi   = 0
+    kapali_sayisi = 0
+
+    for _, b in bacaklar.iterrows():
+        kt = b["kapanis_tarih"]
+        if kt is None or pd.isna(kt):
+            # Hiç kapanmamış → sorgu tarihinde de açık
+            acik_sayisi += 1
+        elif str(kt) > tarih:
+            # Sonradan kapanmış → sorgu tarihinde hâlâ açıktı
+            acik_sayisi += 1
+        else:
+            # kapanis_tarih <= sorgu_tarihi → o tarihte kapalıydı
+            kapali_sayisi += 1
 
     if acik_sayisi > 0 and kapali_sayisi == 0:
         return "Açık"
@@ -1020,8 +1161,13 @@ def viop_strateji_durumu(strateji_id):
 
 
 # ==========================================
-# VIOP PORTFÖY DEĞER HESABI (Aşama 5.4.A)
+# VIOP PORTFÖY DEĞER HESABI (Aşama 5.4.A + 5.4.B)
 # ==========================================
+# Aşama 5.4.A: Portföy ve Aracı Kurum sayfalarına canlı (bugün) entegrasyon.
+# Aşama 5.4.B: Aylık Özet ve Dönemsel Karşılaştırma sayfaları için geriye
+#              dönük (tarih=...) sorgu desteği. Alt çağrılar viop_strateji_pnl
+#              ve viop_strateji_durumu artık "MAX(tarih) WHERE tarih <= X"
+#              ve "kapanis_tarih <= X" mantığıyla geçmiş-tarih uyumlu.
 def viop_portfoy_degeri(tarih=None):
     """
     VIOP varlık özetini portföy entegrasyonu için döndürür.
@@ -1111,15 +1257,15 @@ def viop_portfoy_degeri(tarih=None):
     for _, strat in stratejiler_df.iterrows():
         strat_id_v = int(strat["id"])
 
-        # Durum (canlı türetilir)
-        durum_v = viop_strateji_durumu(strat_id_v)
+        # Durum (canlı türetilir — sorgu tarihine göre)
+        durum_v = viop_strateji_durumu(strat_id_v, tarih=tarih)
 
         # Sadece açık (veya kısmi açık) stratejileri detaya al
         if durum_v not in ("Açık", "Kısmi Açık"):
             continue
 
-        # Unrealized P&L
-        pnl_bilgi_v = viop_strateji_pnl(strat_id_v)
+        # Unrealized P&L (sorgu tarihindeki fiyatlardan)
+        pnl_bilgi_v = viop_strateji_pnl(strat_id_v, tarih=tarih)
         pnl_v = pnl_bilgi_v["toplam_pnl"]
         toplam_acik_pnl += pnl_v
 
@@ -1196,6 +1342,26 @@ def viop_portfoy_degeri(tarih=None):
         deger_tl_son  = teminat_tutar
         kz_tl_son     = toplam_acik_pnl
         maliyet_tl_son = teminat_tutar - toplam_acik_pnl
+
+        # --- Stale snapshot kontrolü (Aşama 5.4.B) ---
+        # Geriye dönük sorgularda snapshot tarihi ile sorgu tarihi
+        # arasında 7+ gün varsa kullanıcıyı uyar. Bu durumda değer hesabı
+        # eski bir snapshot üzerinden, K/Z ise sorgu tarihinin fiyatlarından
+        # hesaplanır — kullanıcı bu tutarsızlığı bilmeli.
+        try:
+            sorgu_dt    = date.fromisoformat(tarih)
+            snapshot_dt = date.fromisoformat(str(teminat_tarihi))
+            gun_fark    = (sorgu_dt - snapshot_dt).days
+            if gun_fark >= 7:
+                uyari_mesaji = (
+                    f"VIOP teminat snapshot'ı {gun_fark} gün eski "
+                    f"(en son: {teminat_tarihi}, sorgu: {tarih}). "
+                    f"Değer bu snapshot üzerinden; K/Z ise sorgu tarihindeki "
+                    f"fiyatlardan hesaplandı."
+                )
+        except (TypeError, ValueError):
+            # Tarih parse edilemezse sessizce geç (köşe durumu)
+            pass
 
     # --- 6) Broker dağılımı ---
     araci_kurum_dagilim = {}
@@ -1274,6 +1440,59 @@ def viop_portfoy_degeri(tarih=None):
         "kapatilmis_teminat"    : kapatilmis_teminat,
         "var_mi"                : var_mi,
     }
+
+
+# ==========================================
+# VIOP YILLIK STALE TARAMASI (Aşama 5.4.B)
+# ==========================================
+# Aylık Özet sayfasında "X ayda snapshot eski" tipi uyarı bandı için.
+# Seçilen yılın 12 ayını tek tek gezer; her ay sonu için
+# viop_portfoy_degeri(tarih=ay_sonu) çağırır ve "uyari" alanı dolu olan
+# (snapshot 7+ gün eski olduğu için) ayları toparlayıp döndürür.
+def viop_yil_uyari_tara(yil):
+    """
+    Seçilen yıl için her ay sonunda VIOP snapshot durumunu tarar.
+
+    Parametre:
+      yil : int — örn. 2025
+
+    Dönen list (boş olabilir):
+      [
+        {
+          "ay"     : int (1-12),
+          "ay_adi" : str (örn. "Ağu"),
+          "tarih"  : str (sorgu tarihi, "YYYY-MM-DD"),
+          "uyari"  : str (viop_portfoy_degeri'den gelen uyarı mesajı),
+        },
+        ...
+      ]
+
+    Sadece "uyari" alanı dolu olan aylar listeye eklenir. Snapshot disiplinli
+    (her ay sonu girilen) bir kullanıcıda liste boş döner.
+    """
+    uyarilar = []
+    for ay in range(1, 13):
+        # Ay sonu tarihi formülü aylik_portfoy_ozeti ile birebir aynı
+        if ay == 12:
+            ay_sonu = f"{yil+1}-01-01"
+        else:
+            ay_sonu = f"{yil}-{str(ay+1).zfill(2)}-01"
+
+        # Aylık özet/dağılım ile aynı semantik: bir gün öncesini sorgula
+        # (varlık sorguları "tarih < ay_sonu" mantığı ile çalışıyor).
+        viop_kesim = (
+            datetime.strptime(ay_sonu, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+        sonuc = viop_portfoy_degeri(tarih=viop_kesim)
+        if sonuc.get("uyari"):
+            uyarilar.append({
+                "ay"     : ay,
+                "ay_adi" : AY_ISIMLERI[ay - 1],
+                "tarih"  : viop_kesim,
+                "uyari"  : sonuc["uyari"],
+            })
+    return uyarilar
 
 
 if __name__ == "__main__":
