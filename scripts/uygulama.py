@@ -4338,6 +4338,156 @@ elif sayfa == "💱 VIOP Fiyat Güncelle":
             else:
                 son_fiyatlar_fg[kod_fg] = (None, None)
 
+# ==========================================
+    # BÖLÜM 0: OTOMATİK ÇEK (İŞ YATIRIM)
+    # ==========================================
+    st.subheader("🔄 Otomatik Çek (İş Yatırım)")
+    st.caption(
+        "Açık VIOP bacaklarının güncel uzlaşma fiyatlarını İş Yatırım "
+        "endpoint'inden tek tuşla çeker. Veriler **en az 15 dakika gecikmelidir** "
+        "(BIST politikası). En doğru günlük uzlaşma için **18:30 sonrası** çekim önerilir."
+    )
+
+    # --- Açık bacak sayısını ön bilgi olarak göster ---
+    acik_bacak_sayisi_fg_oc = 0
+    if not bacaklar_tum_fg.empty:
+        _acik_df_oc = bacaklar_tum_fg[bacaklar_tum_fg["kapanis_tarih"].isna()]
+        acik_bacak_sayisi_fg_oc = _acik_df_oc["sozlesme_kodu"].nunique()
+
+    # --- Son çekim bilgisi (session_state'te tutulur) ---
+    from datetime import datetime as _dt_oc
+    son_cekim_zamani_fg_oc = st.session_state.get("viop_son_otomatik_cekim")
+    son_cekim_str_fg_oc = "—"
+    if son_cekim_zamani_fg_oc is not None:
+        gecen_sn_oc = (_dt_oc.now() - son_cekim_zamani_fg_oc).total_seconds()
+        if gecen_sn_oc < 60:
+            son_cekim_str_fg_oc = f"{int(gecen_sn_oc)} sn önce"
+        elif gecen_sn_oc < 3600:
+            son_cekim_str_fg_oc = f"{int(gecen_sn_oc / 60)} dk önce"
+        else:
+            son_cekim_str_fg_oc = son_cekim_zamani_fg_oc.strftime("%H:%M")
+
+    col_oc1, col_oc2 = st.columns([2, 3])
+    with col_oc1:
+        st.markdown(f"**Açık sözleşme:** {acik_bacak_sayisi_fg_oc}")
+    with col_oc2:
+        st.markdown(f"**Son çekim:** {son_cekim_str_fg_oc}")
+
+    # --- Cooldown kontrolü (30 sn) ---
+    COOLDOWN_SN_OC = 30
+    cooldown_aktif_oc = False
+    bekleme_kalan_oc = 0
+    if son_cekim_zamani_fg_oc is not None:
+        gecen_sn_oc = (_dt_oc.now() - son_cekim_zamani_fg_oc).total_seconds()
+        if gecen_sn_oc < COOLDOWN_SN_OC:
+            cooldown_aktif_oc = True
+            bekleme_kalan_oc = int(COOLDOWN_SN_OC - gecen_sn_oc)
+
+    # --- Çekim butonu ---
+    if acik_bacak_sayisi_fg_oc == 0:
+        st.info(
+            "Açık VIOP bacağı yok. Otomatik çekim için önce **➕ VIOP Strateji Ekle** "
+            "sayfasından bir strateji açın."
+        )
+    else:
+        buton_disabled_oc = cooldown_aktif_oc
+        buton_label_oc = "🔄 İş Yatırım'dan Otomatik Çek"
+        if cooldown_aktif_oc:
+            buton_label_oc = f"⏳ Cooldown ({bekleme_kalan_oc} sn)"
+
+        if st.button(
+            buton_label_oc,
+            type="primary",
+            key="viop_oc_cek_btn",
+            disabled=buton_disabled_oc,
+        ):
+            # --- Çekim akışı ---
+            from fiyat_cek import viop_fiyatlari_cek_isyatirim
+
+            # Streamlit progress bar
+            ilerleme_bar_oc = st.progress(0.0, text="Başlatılıyor...")
+
+            def _ilerleme_oc(sira, toplam, kod, durum_str):
+                """Streamlit progress callback."""
+                yuzde = sira / toplam
+                ilerleme_bar_oc.progress(
+                    yuzde,
+                    text=f"({sira}/{toplam}) {kod} — {durum_str}",
+                )
+
+            try:
+                basari_oc, hata_oc = viop_fiyatlari_cek_isyatirim(
+                    ilerleme_callback=_ilerleme_oc
+                )
+            except Exception as e_oc:
+                ilerleme_bar_oc.empty()
+                st.error(f"❌ Çekim sırasında beklenmedik hata: {e_oc}")
+                basari_oc, hata_oc = [], []
+
+            ilerleme_bar_oc.empty()
+
+            # Cooldown zamanını kaydet
+            st.session_state["viop_son_otomatik_cekim"] = _dt_oc.now()
+
+            # --- Sonuç özeti ---
+            if basari_oc:
+                st.success(
+                    f"✅ {len(basari_oc)} sözleşme başarıyla güncellendi."
+                )
+
+                # Başarı detayları tablo halinde
+                with st.expander("📋 Çekilen fiyatlar", expanded=False):
+                    basari_df_oc = pd.DataFrame(
+                        basari_oc,
+                        columns=["Sözleşme Kodu", "Fiyat", "Tarih", "Teminat (TL)"],
+                    )
+                    st.dataframe(
+                        basari_df_oc,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Fiyat": st.column_config.NumberColumn(
+                                "Fiyat", format="%.2f",
+                            ),
+                            "Teminat (TL)": st.column_config.NumberColumn(
+                                "Teminat (TL)", format="%.2f",
+                                help="BIST başlangıç teminatı (sadece vadeli için)",
+                            ),
+                        },
+                    )
+
+            if hata_oc:
+                st.warning(
+                    f"⚠️ {len(hata_oc)} sözleşme çekilemedi. "
+                    f"Aşağıdaki tablodan manuel olarak girebilirsiniz."
+                )
+
+                # Hata detayları tablo halinde
+                with st.expander("🔍 Çekilemeyen sözleşmeler", expanded=True):
+                    hata_df_oc = pd.DataFrame(
+                        hata_oc,
+                        columns=["Sözleşme Kodu", "Tip", "Mesaj"],
+                    )
+                    st.dataframe(
+                        hata_df_oc,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 1.5 sn sonra rerun (son fiyatlar tablosunu yenilemek için)
+            if basari_oc:
+                import time as _time_oc
+                _time_oc.sleep(1.5)
+                st.rerun()
+
+    if cooldown_aktif_oc:
+        st.caption(
+            f"⏳ Tekrar çekmek için **{bekleme_kalan_oc} sn** beklemelisin "
+            f"(sunucuya nezaket için)."
+        )
+
+    st.markdown("---")
+
     # ==========================================
     # BÖLÜM 1: SÖZLEŞME FİYAT GİRİŞİ
     # ==========================================

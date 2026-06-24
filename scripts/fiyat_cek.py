@@ -1,11 +1,12 @@
 # ============================================================
-# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST Hisse + Kripto + Fiziki Altın
+# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST Hisse + Kripto + Fiziki Altın + VIOP
 # ============================================================
 # Yabancı hisse fiyatlarını Yahoo Finance'tan,
 # BIST hisse fiyatlarını Yahoo Finance'tan (.IS suffix ile),
 # kripto varlık fiyatlarını Yahoo Finance'tan (-USD suffix ile),
 # fiziki altın fiyatlarını ons altın fiyatından hesaplayarak
-# fiyat_gecmisi tablosuna yazar.
+# VIOP sözleşme fiyatlarını İş Yatırım endpoint'inden
+# fiyat_gecmisi / viop_fiyat_gecmisi tablolarına yazar.
 #
 # KULLANIM (proje kök klasöründen):
 #   python scripts/fiyat_cek.py                        -> bugünkü fiyatlar
@@ -14,15 +15,21 @@
 #   python scripts/fiyat_cek.py --sadece-bist
 #   python scripts/fiyat_cek.py --sadece-kripto
 #   python scripts/fiyat_cek.py --sadece-altin
+#   python scripts/fiyat_cek.py --sadece-viop
 #   python scripts/fiyat_cek.py --sadece-bist --baslangic 2022-03-01
 #
 # NOT: Altın fiyatları "eritme değeri" üzerinden hesaplanır.
 #      Piyasadaki gerçek fiyat %3-10 daha yüksek olabilir (işçilik/prim).
+# NOT: VIOP çekimi sadece "bugünkü fiyat" modunda çalışır
+#      (endpoint geçmiş veri sağlamıyor — her zaman güncel snapshot).
 # ============================================================
 
 import sys
+import json
+import time
 from datetime import date, timedelta
 
+import requests
 import yfinance as yf
 import pandas as pd
 
@@ -51,6 +58,49 @@ ALTIN_CARPANLARI = {
 
 # 1 troy ons = 31.1035 gram
 TROY_ONS_GRAM = 31.1035
+
+
+# ============================================================
+# İŞ YATIRIM VIOP ENDPOINT TANIMLARI
+# ============================================================
+# İş Yatırım'ın public Data.aspx endpoint'i tek bir VIOP sözleşme kodu alır
+# ve o sözleşmenin güncel bilgilerini JSON olarak döndürür.
+# Veriler BIST kaynaklı ve en az 15 dakika gecikmelidir.
+#
+# Endpoint örneği:
+#   .../OneEndeks?endeks=F_XLBNK1226
+#   .../OneEndeks?endeks=O_XU030E0626C18000.00
+#
+# Cevap formatı:
+#   [{"symbol": "...", "settlement": 19120, "last": 19120,
+#     "updateDate": "2026-06-24T12:47:43.000+03",
+#     "initialMargin": 26576.8, ...}]
+#
+# Hata durumunda:
+#   {"error": {"code": "EINVAL", "message": "..."}}
+# ============================================================
+
+ISYATIRIM_VIOP_URL = (
+    "https://www.isyatirim.com.tr/_layouts/15/"
+    "Isyatirim.Website/Common/Data.aspx/OneEndeks"
+)
+
+# Browser-benzeri başlıklar (anti-bot kontrolünü geçmek için)
+ISYATIRIM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://www.isyatirim.com.tr/tr-tr/analiz/Sayfalar/viop.aspx",
+}
+
+# Her HTTP isteği arasında bekleme süresi (saniye)
+ISYATIRIM_BEKLEME_SN = 0.3
+
+# HTTP timeout süresi (saniye)
+ISYATIRIM_TIMEOUT_SN = 10
 
 
 # ============================================================
@@ -228,7 +278,7 @@ def bist_fiyatlari_cek(baslangic_tarihi=None):
                 print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {eklenen} gün fiyat eklendi")
             else:
                 son_fiyat = float(veri["Close"].iloc[-1])
-                print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {son_fiyat:.2f} TRY")
+                print(f"  ✅ {kod:6s} ({yahoo_sembol}) ({ad}) → {son_fiyat:.2f} {para_birimi}")
 
         except Exception as e:
             print(f"  ❌ {kod} hatası: {e}")
@@ -242,10 +292,10 @@ def bist_fiyatlari_cek(baslangic_tarihi=None):
 
 
 # ============================================================
-# KRİPTO VARLIK FİYATLARI
+# KRİPTO FİYATLARI
 # ============================================================
-# Yahoo Finance'ta kripto varlıklar "-USD" suffix'i ile listelenir.
-# Örnek: BTC → BTC-USD, XRP → XRP-USD, DOGE → DOGE-USD
+# Yahoo Finance'ta kripto sembolleri "-USD" suffix'i ile listelenir.
+# Örnek: BTC → BTC-USD, ETH → ETH-USD
 # Fiyatlar USD cinsindendir.
 # ============================================================
 
@@ -254,17 +304,16 @@ def kripto_fiyatlari_cek(baslangic_tarihi=None):
     Kripto türündeki varlıklar için fiyatları Yahoo Finance'tan çeker.
 
     Yahoo Finance'ta kripto sembolleri "-USD" ile biter:
-      BTC → BTC-USD, XRP → XRP-USD, XLM → XLM-USD, DOGE → DOGE-USD
+      BTC → BTC-USD, ETH → ETH-USD
 
     baslangic_tarihi verilirse → o tarihten bugüne günlük fiyatlar (geçmiş veri)
     baslangic_tarihi None ise  → sadece bugünkü fiyat (hızlı güncelleme)
 
-    Fiyatlar USD cinsinden kaydedilir (Yahoo zaten USD olarak döndürür).
+    Fiyatlar USD cinsinden kaydedilir.
     """
     baglanti = baglan()
     cursor = baglanti.cursor()
 
-    # Veritabanından Kripto türündeki varlıkları al
     cursor.execute("""
         SELECT id, kod, ad, para_birimi FROM varliklar WHERE tur = 'Kripto'
     """)
@@ -286,7 +335,6 @@ def kripto_fiyatlari_cek(baslangic_tarihi=None):
     for sira, (varlik_id, kod, ad, para_birimi) in enumerate(varliklar, 1):
         try:
             print(f"  ⏳ ({sira}/{toplam_varlik}) {kod} çekiliyor...")
-            # Kripto sembolleri Yahoo'da "-USD" ile aranır
             yahoo_sembol = f"{kod}-USD"
             ticker = yf.Ticker(yahoo_sembol)
 
@@ -486,11 +534,211 @@ def altin_fiyatlari_cek(baslangic_tarihi=None):
 
 
 # ============================================================
+# VIOP FİYATLARI — İŞ YATIRIM ENDPOINT (YENİ — Aşama 5.5.B)
+# ============================================================
+# Açık VIOP bacaklarının sözleşme kodlarını alır, her biri için
+# İş Yatırım endpoint'ine ayrı HTTP isteği gönderir, dönen JSON'dan
+# settlement fiyatını ve initial_margin'i viop_fiyat_gecmisi tablosuna yazar.
+#
+# Tasarım kararları:
+# - Sadece açık (kapanis_tarih IS NULL) bacaklar çekilir
+# - DISTINCT sozlesme_kodu — aynı kod birden çok bacakta varsa tek istek
+# - Fiyat alanı: 'settlement' (BIST'in günlük resmi uzlaşması)
+# - Tarih: updateDate'in YYYY-MM-DD kısmı (gün içi çekersen bugün, hafta sonu cuma)
+# - INSERT OR REPLACE — aynı sözleşme + tarih varsa üzerine yazar
+# - Aralara 0.3 sn nezaket sleep
+# - HTTP hataları, JSON hataları, endpoint error response (EINVAL) ayrı handle
+# - Streamlit'ten çağrı için ilerleme callback'i (opsiyonel)
+# ============================================================
+
+def _isyatirim_tek_sozlesme_cek(sozlesme_kodu):
+    """
+    Tek bir VIOP sözleşmesi için İş Yatırım endpoint'inden veri çeker.
+
+    Geri dönüş:
+      ('ok',    {'fiyat': ..., 'tarih': ..., 'initial_margin': ...})  başarı
+      ('bos',   'mesaj')                                              sözleşme bulunamadı / yanıt boş
+      ('hata',  'mesaj')                                              network / HTTP / parse hatası
+    """
+    url = f"{ISYATIRIM_VIOP_URL}?endeks={sozlesme_kodu}"
+
+    # --- HTTP isteği ---
+    try:
+        response = requests.get(
+            url,
+            headers=ISYATIRIM_HEADERS,
+            timeout=ISYATIRIM_TIMEOUT_SN,
+        )
+    except requests.exceptions.Timeout:
+        return ("hata", f"Timeout ({ISYATIRIM_TIMEOUT_SN} sn)")
+    except requests.exceptions.RequestException as e:
+        return ("hata", f"Network: {e}")
+
+    if response.status_code != 200:
+        return ("hata", f"HTTP {response.status_code}")
+
+    # --- JSON parse ---
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        return ("hata", "JSON parse hatası")
+
+    # --- Endpoint error response: {"error": {...}} ---
+    if isinstance(data, dict) and "error" in data:
+        mesaj = data["error"].get("message", "Bilinmeyen endpoint hatası")
+        return ("bos", mesaj)
+
+    # --- Boş veya beklenmedik format ---
+    if not isinstance(data, list) or not data:
+        return ("bos", "Boş cevap")
+
+    ilk = data[0]
+
+    # --- settlement değeri (zorunlu) ---
+    fiyat = ilk.get("settlement")
+    if fiyat is None:
+        return ("bos", "settlement alanı yok")
+    try:
+        fiyat = float(fiyat)
+    except (TypeError, ValueError):
+        return ("bos", f"settlement sayısal değil ({fiyat})")
+
+    # --- updateDate'ten tarih çıkar ---
+    # Format: "2026-06-24T12:47:43.000+03"  → "2026-06-24"
+    update_date = ilk.get("updateDate", "")
+    if "T" in update_date:
+        tarih = update_date.split("T")[0]
+    else:
+        # Fallback: updateDate yoksa bugünün tarihi
+        tarih = date.today().strftime("%Y-%m-%d")
+
+    # --- initialMargin (opsiyonel — opsiyonlarda gelmez) ---
+    initial_margin = ilk.get("initialMargin")
+    if initial_margin is not None:
+        try:
+            initial_margin = float(initial_margin)
+        except (TypeError, ValueError):
+            initial_margin = None
+
+    return ("ok", {
+        "fiyat": fiyat,
+        "tarih": tarih,
+        "initial_margin": initial_margin,
+    })
+
+
+def viop_fiyatlari_cek_isyatirim(ilerleme_callback=None):
+    """
+    Açık VIOP bacaklarının fiyatlarını İş Yatırım endpoint'inden çeker.
+
+    Parametre:
+      ilerleme_callback: opsiyonel fonksiyon (sira, toplam, sozlesme_kodu, durum_str)
+                         Streamlit'te st.progress için kullanılır.
+                         CLI'dan çağrılırsa None bırakılır.
+
+    Geri dönüş:
+      (basari_listesi, hata_listesi)
+        basari_listesi: [(sozlesme_kodu, fiyat, tarih, initial_margin), ...]
+        hata_listesi  : [(sozlesme_kodu, hata_tipi, mesaj), ...]
+                        hata_tipi: 'bos' veya 'hata'
+
+    Tablo yazımı:
+      Aynı sözleşme + tarih için DELETE + INSERT (mevcut deseninle uyumlu).
+      kaynak = 'is-yatirim'.
+    """
+    print("\n[VIOP] İş Yatırım endpoint'inden VIOP fiyatları çekiliyor...")
+
+    # --- Açık bacakların DISTINCT sözleşme kodlarını çek ---
+    baglanti = baglan()
+    cursor = baglanti.cursor()
+    cursor.execute("""
+        SELECT DISTINCT sozlesme_kodu
+        FROM viop_bacaklar
+        WHERE kapanis_tarih IS NULL
+        ORDER BY sozlesme_kodu
+    """)
+    sozlesme_kodlari = [satir[0] for satir in cursor.fetchall()]
+
+    if not sozlesme_kodlari:
+        print("  [VIOP] Açık VIOP bacağı yok, çekim atlanıyor.")
+        return ([], [])
+
+    print(f"  {len(sozlesme_kodlari)} açık sözleşme bulundu, çekiliyor...")
+
+    basari_listesi = []
+    hata_listesi = []
+    toplam = len(sozlesme_kodlari)
+
+    # --- Turso stream timeout fix ---
+    db._baglanti = None
+    baglanti = baglan()
+    cursor = baglanti.cursor()
+
+    for sira, kod in enumerate(sozlesme_kodlari, 1):
+        durum, sonuc = _isyatirim_tek_sozlesme_cek(kod)
+
+        if durum == "ok":
+            fiyat = sonuc["fiyat"]
+            tarih = sonuc["tarih"]
+            initial_margin = sonuc["initial_margin"]
+
+            # Eski kaydı sil + yeni kaydı ekle (initial_margin dahil)
+            cursor.execute(
+                "DELETE FROM viop_fiyat_gecmisi "
+                "WHERE sozlesme_kodu = ? AND tarih = ?",
+                (kod, tarih),
+            )
+            cursor.execute(
+                "INSERT INTO viop_fiyat_gecmisi "
+                "(sozlesme_kodu, tarih, fiyat, kaynak, initial_margin) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (kod, tarih, fiyat, "is-yatirim", initial_margin),
+            )
+            baglanti.commit()
+
+            basari_listesi.append((kod, fiyat, tarih, initial_margin))
+            im_str = f"{initial_margin:,.2f}" if initial_margin else "—"
+            print(f"  ✅ ({sira}/{toplam}) {kod} → {fiyat} (teminat: {im_str})")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"OK: {fiyat}")
+
+        elif durum == "bos":
+            hata_listesi.append((kod, "bos", sonuc))
+            print(f"  ⚠️ ({sira}/{toplam}) {kod} → {sonuc}")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"Bulunamadı: {sonuc}")
+
+        else:  # hata
+            hata_listesi.append((kod, "hata", sonuc))
+            print(f"  ❌ ({sira}/{toplam}) {kod} → {sonuc}")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"Hata: {sonuc}")
+
+        # Aralara nezaket bekleme süresi (son sözleşme hariç)
+        if sira < toplam:
+            time.sleep(ISYATIRIM_BEKLEME_SN)
+
+    senkronize_et()
+    db._baglanti = None
+
+    print(f"\n  Toplam: {len(basari_listesi)} başarılı, {len(hata_listesi)} hatalı/eksik")
+    return (basari_listesi, hata_listesi)
+
+
+# ============================================================
 # ANA FONKSİYONLAR
 # ============================================================
 
 def tum_fiyatlari_cek(baslangic_tarihi=None):
-    """Yabancı hisse, BIST hisse, kripto ve altın fiyatlarını çeker."""
+    """Yabancı hisse, BIST hisse, kripto ve altın fiyatlarını çeker.
+
+    NOT: VIOP otomatik çekimi bu fonksiyona dahil DEĞİL — endpoint geçmiş veri
+    sağlamadığı için "tum_fiyatlari_cek" daki "geçmiş tarih" akışına uymuyor.
+    VIOP çekimi için ayrıca `viop_fiyatlari_cek_isyatirim()` çağrılır.
+    """
     if baslangic_tarihi:
         print(f"📊 Geçmiş Fiyat Güncelleme — {baslangic_tarihi} → {date.today()}")
     else:
@@ -524,5 +772,10 @@ if __name__ == "__main__":
         kripto_fiyatlari_cek(baslangic)
     elif "--sadece-altin" in sys.argv:
         altin_fiyatlari_cek(baslangic)
+    elif "--sadece-viop" in sys.argv:
+        # VIOP geçmiş veri desteklemiyor; --baslangic parametresi yoksayılır
+        if baslangic:
+            print(f"⚠️  VIOP geçmiş veri desteklemiyor, --baslangic '{baslangic}' yoksayılıyor.")
+        viop_fiyatlari_cek_isyatirim()
     else:
         tum_fiyatlari_cek(baslangic)

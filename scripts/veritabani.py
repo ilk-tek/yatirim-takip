@@ -1,182 +1,108 @@
-# ==========================================
-# VERİTABANI KURULUM VE GÜNCELLEME
-# ==========================================
-import sqlite3
+# ============================================================
+# VERİTABANI ŞEMASI VE MİGRASYON
+# ============================================================
+# Bu dosya, uygulamanın tüm tablolarını oluşturur ve gerektiğinde
+# mevcut tablolara yeni kolonlar ekler (migration).
+#
+# KULLANIM:
+#   python scripts/veritabani.py
+#
+# Çalıştırıldığında:
+#   1) Tüm tablolar yoksa oluşturulur (CREATE TABLE IF NOT EXISTS)
+#   2) Mevcut tablolara eksik kolonlar eklenir (ALTER TABLE)
+#
+# NOT: Bu script idempotent'tır — istediğin kadar çalıştırabilirsin,
+#      her çağrıda sadece eksikleri tamamlar.
+# ============================================================
+
 from db import baglan, senkronize_et
 
+
 def veritabani_olustur():
+    """Tüm tabloları oluşturur (yoksa)."""
     baglanti = baglan()
     cursor = baglanti.cursor()
 
-    # --- Varlıklar tablosu ---
+    # --- Varlık tablosu ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS varliklar (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            kod         TEXT NOT NULL UNIQUE,
-            ad          TEXT,
-            tur         TEXT NOT NULL,
-            para_birimi TEXT DEFAULT 'TRY',
-            exposure    TEXT DEFAULT 'TL'
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            kod          TEXT NOT NULL UNIQUE,
+            ad           TEXT NOT NULL,
+            tur          TEXT NOT NULL,
+            para_birimi  TEXT NOT NULL DEFAULT 'TRY'
         )
     """)
 
     # --- İşlemler tablosu ---
+    # Alım ve satım işlemleri burada tutulur.
+    # tip alanı: 'Alış' veya 'Satış'
+    # tutar alanı = adet × fiyat (girilirken hesaplanır)
+    # araci_kurum: hangi aracı kurum üzerinden yapıldığı
+    # portfoy_etiketi: serbest metin etiketi (örn. "Emeklilik", "Kısa vade")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS islemler (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            varlik_id   INTEGER,
-            tarih       TEXT NOT NULL,
-            islem_turu  TEXT NOT NULL,
-            adet        REAL,
-            fiyat       REAL NOT NULL,
-            tutar       REAL,
-            notlar      TEXT,
-            araci_kurum TEXT,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            varlik_id       INTEGER NOT NULL,
+            tip             TEXT NOT NULL,
+            tarih           TEXT NOT NULL,
+            adet            REAL NOT NULL,
+            fiyat           REAL NOT NULL,
+            tutar           REAL NOT NULL,
+            aciklama        TEXT,
+            araci_kurum     TEXT,
             portfoy_etiketi TEXT,
             FOREIGN KEY (varlik_id) REFERENCES varliklar(id)
         )
     """)
 
-
-    # --- Döviz kuru geçmişi tablosu ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS kur_gecmisi (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            para_birimi  TEXT NOT NULL,
-            tarih        TEXT NOT NULL,
-            kur          REAL NOT NULL,
-            kaynak       TEXT DEFAULT 'yfinance',
-            UNIQUE(para_birimi, tarih)
-        )
-    """)
-
     # --- Fiyat geçmişi tablosu ---
+    # Günlük kapanış fiyatları burada tutulur.
+    # kaynak alanı: 'manuel', 'yahoo', 'yahoo-bist', 'yahoo-kripto', 'yahoo-altin',
+    #                'tefas' gibi değerler alır.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fiyat_gecmisi (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            varlik_id   INTEGER,
-            tarih       TEXT NOT NULL,
-            fiyat       REAL NOT NULL,
-            kaynak      TEXT DEFAULT 'manuel',
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            varlik_id  INTEGER NOT NULL,
+            tarih      TEXT NOT NULL,
+            fiyat      REAL NOT NULL,
+            kaynak     TEXT DEFAULT 'manuel',
             UNIQUE(varlik_id, tarih),
             FOREIGN KEY (varlik_id) REFERENCES varliklar(id)
         )
     """)
 
-    # --- Aylık performans tablosu ---
+    # --- Kur tablosu ---
+    # Yabancı para birimleri için TRY karşılığı kurlar.
+    # USDTRY, EURTRY gibi para birimi kodları doğrudan kullanılır.
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS aylik_performans (
+        CREATE TABLE IF NOT EXISTS kurlar (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            varlik_id       INTEGER,
-            yil             INTEGER NOT NULL,
-            ay              INTEGER NOT NULL,
-            ay_basi_fiyat   REAL,
-            ay_sonu_fiyat   REAL,
-            aylik_getiri    REAL,
-            twr_kumulatif   REAL,
-            yillik_getiri   REAL,
-            UNIQUE(varlik_id, yil, ay),
-            FOREIGN KEY (varlik_id) REFERENCES varliklar(id)
-        )
-    """)
-
-    # --- Mevduat detay tablosu ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mevduat_detay (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            varlik_id        INTEGER NOT NULL,
-            anapara          REAL NOT NULL,
-            vade_turu        TEXT NOT NULL,
-            baslangic_tarihi TEXT NOT NULL,
-            vade_gun         INTEGER,
-            bitis_tarihi     TEXT,
-            aktif            INTEGER DEFAULT 1,
-            notlar           TEXT,
-            FOREIGN KEY (varlik_id) REFERENCES varliklar(id)
-        )
-    """)
-
-    # --- Faiz geçmişi tablosu ---
-    # Gecelik mevduatta faiz oranı değişince buraya yeni kayıt girilir
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS faiz_gecmisi (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            varlik_id        INTEGER NOT NULL,
-            tarih            TEXT NOT NULL,
-            faiz_orani       REAL NOT NULL,
-            UNIQUE(varlik_id, tarih),
-            FOREIGN KEY (varlik_id) REFERENCES varliklar(id)
-        )
-    """)
-
-    # --- Döviz kuru geçmişi tablosu ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS kur_gecmisi (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            para_birimi  TEXT NOT NULL,
-            tarih        TEXT NOT NULL,
-            kur          REAL NOT NULL,
-            kaynak       TEXT DEFAULT 'yfinance',
+            para_birimi     TEXT NOT NULL,
+            tarih           TEXT NOT NULL,
+            kur             REAL NOT NULL,
+            kaynak          TEXT DEFAULT 'manuel',
             UNIQUE(para_birimi, tarih)
         )
     """)
 
-    # --- Portföy seviyesinde aylık nakit akışları ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS portfoy_akislari (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            yil       INTEGER NOT NULL,
-            ay        INTEGER NOT NULL,
-            dis_giris REAL DEFAULT 0,
-            dis_cikis REAL DEFAULT 0,
-            notlar    TEXT,
-            UNIQUE(yil, ay)
-        )
-    """)
-
-    # --- Aracı kurumlar listesi ---
-    # İşlem ekle/düzenle sayfalarında dropdown olarak kullanılır.
-    # Kullanıcı yeni aracı kurum ekleyebilir.
+    # --- Aracı kurum yönetim tablosu ---
+    # İlk açıkken bir tane bile aracı kurum tanımlı olmayabilir;
+    # ekleme/silme UI'dan yapılır.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS araci_kurumlar (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            ad   TEXT NOT NULL UNIQUE
+            id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            ad  TEXT NOT NULL UNIQUE
         )
     """)
 
-    # Varsayılan aracı kurumlar (yoksa ekle)
-    varsayilan_araci = [
-        "İş Yatırım", "İş Bankası", "YKB", "Anadolubank",
-        "Ata Yatırım", "Garanti BBVA", "Akbank", "Kiralık Kasa", "Midas"
-    ]
-    for araci in varsayilan_araci:
-        cursor.execute(
-            "INSERT OR IGNORE INTO araci_kurumlar (ad) VALUES (?)", (araci,)
-        )
-
-    # --- Portföy etiketleri listesi ---
-    # İşlem ekle/düzenle sayfalarında dropdown olarak kullanılır.
-    # Kullanıcı yeni etiket ekleyebilir.
+    # --- Portföy etiket yönetim tablosu ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS portfoy_etiketleri (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            ad   TEXT NOT NULL UNIQUE
+            id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            ad  TEXT NOT NULL UNIQUE
         )
     """)
-
-    # Varsayılan portföy etiketleri (yoksa ekle)
-    varsayilan_etiket = [
-        "Yatırım", "Defans", "Atak", "YP Fon",
-        "Arbitraj", "Emtia", "Uzun Borçlanma", "M"
-    ]
-    for etiket in varsayilan_etiket:
-        cursor.execute(
-            "INSERT OR IGNORE INTO portfoy_etiketleri (ad) VALUES (?)", (etiket,)
-        )
-
-    # ==========================================
-    # VIOP MODÜLÜ — YENİ TABLOLAR
-    # ==========================================
 
     # --- VIOP stratejileri tablosu ---
     # Bir stratejide bir veya daha fazla "bacak" bulunabilir.
@@ -246,13 +172,18 @@ def veritabani_olustur():
     # Her sözleşmenin günlük uzlaşma fiyatlarını tutar.
     # sozlesme_kodu üzerinden viop_bacaklar ile bağlanır (varlik_id YOK).
     # MAX(tarih) pattern ile son fiyatı çekme deseni kullanılır.
+    # initial_margin: İş Yatırım'dan otomatik çekimle birlikte gelen
+    #                 BIST başlangıç teminatı. Manuel girişlerde NULL kalır.
+    #                 Opsiyon sözleşmeleri için endpoint bu değeri döndürmediğinden
+    #                 opsiyonlarda da genelde NULL olur.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS viop_fiyat_gecmisi (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            sozlesme_kodu  TEXT NOT NULL,
-            tarih          TEXT NOT NULL,
-            fiyat          REAL NOT NULL,
-            kaynak         TEXT DEFAULT 'manuel',
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            sozlesme_kodu   TEXT NOT NULL,
+            tarih           TEXT NOT NULL,
+            fiyat           REAL NOT NULL,
+            kaynak          TEXT DEFAULT 'manuel',
+            initial_margin  REAL,
             UNIQUE(sozlesme_kodu, tarih)
         )
     """)
@@ -261,7 +192,8 @@ def veritabani_olustur():
     senkronize_et()
     print("Veritabanı tabloları hazır.")
 
-# --- Programı doğrudan çalıştırınca tabloları oluştur ---
+
+# --- Programı doğrudan çalıştırınca tabloları oluştur + migration ---
 if __name__ == "__main__":
     veritabani_olustur()
 
@@ -269,12 +201,21 @@ if __name__ == "__main__":
     baglanti = baglan()
     cursor = baglanti.cursor()
 
+    # islemler tablosu için (mevcut migration)
     for sutun, tip in [("araci_kurum", "TEXT"), ("portfoy_etiketi", "TEXT")]:
         try:
             cursor.execute(f"ALTER TABLE islemler ADD COLUMN {sutun} {tip}")
-            print(f"'{sutun}' sütunu eklendi.")
+            print(f"'islemler.{sutun}' sütunu eklendi.")
         except:
-            print(f"'{sutun}' sütunu zaten mevcut, atlandı.")
+            print(f"'islemler.{sutun}' sütunu zaten mevcut, atlandı.")
+
+    # viop_fiyat_gecmisi tablosu için — YENİ (Aşama 5.5.A)
+    for sutun, tip in [("initial_margin", "REAL")]:
+        try:
+            cursor.execute(f"ALTER TABLE viop_fiyat_gecmisi ADD COLUMN {sutun} {tip}")
+            print(f"'viop_fiyat_gecmisi.{sutun}' sütunu eklendi.")
+        except:
+            print(f"'viop_fiyat_gecmisi.{sutun}' sütunu zaten mevcut, atlandı.")
 
     baglanti.commit()
     senkronize_et()
