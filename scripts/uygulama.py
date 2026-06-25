@@ -5803,6 +5803,160 @@ elif sayfa == "💱 Fiyat Güncelle":
             else:
                 st.warning("Geçmiş veri çekilemedi.")
 
+
+
+
+
+# ==========================================
+        # OTOMATİK ÇEK (TEFAS)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🔄 Otomatik Çek (TEFAS)")
+        st.caption(
+            "DB'deki tüm Yatırım Fonu ve BES Fonu varlıklarının son 30 günlük "
+            "fiyat geçmişini TEFAS resmi API'sinden tek tuşla çeker. "
+            "TEFAS NAV değerleri **17:00 sonrası** kesinleşir; bu saatten önce "
+            "çekersen gün içi geçici değer alırsın. "
+            "Rate-limit nedeniyle çekim **5-7 dakika** sürebilir."
+        )
+
+        # --- Fon sayısını ön bilgi olarak göster ---
+        from db import baglan as _baglan_tefas_oc
+        _bag_tefas_oc = _baglan_tefas_oc()
+        _cur_tefas_oc = _bag_tefas_oc.cursor()
+        _cur_tefas_oc.execute("""
+            SELECT COUNT(*) FROM varliklar
+            WHERE tur IN ('Yatırım Fonu', 'BES Fonu')
+        """)
+        toplam_fon_sayisi_tefas_oc = _cur_tefas_oc.fetchone()[0] or 0
+
+        # --- Son çekim bilgisi (session_state'te tutulur) ---
+        from datetime import datetime as _dt_tefas_oc
+        son_cekim_zamani_tefas_oc = st.session_state.get("tefas_son_otomatik_cekim")
+        son_cekim_str_tefas_oc = "—"
+        if son_cekim_zamani_tefas_oc is not None:
+            gecen_sn_tefas_oc = (_dt_tefas_oc.now() - son_cekim_zamani_tefas_oc).total_seconds()
+            if gecen_sn_tefas_oc < 60:
+                son_cekim_str_tefas_oc = f"{int(gecen_sn_tefas_oc)} sn önce"
+            elif gecen_sn_tefas_oc < 3600:
+                son_cekim_str_tefas_oc = f"{int(gecen_sn_tefas_oc / 60)} dk önce"
+            else:
+                son_cekim_str_tefas_oc = son_cekim_zamani_tefas_oc.strftime("%H:%M")
+
+        col_tefas_oc1, col_tefas_oc2 = st.columns([2, 3])
+        with col_tefas_oc1:
+            st.markdown(f"**Tanımlı fon:** {toplam_fon_sayisi_tefas_oc}")
+        with col_tefas_oc2:
+            st.markdown(f"**Son çekim:** {son_cekim_str_tefas_oc}")
+
+        # --- Cooldown kontrolü (30 sn) ---
+        COOLDOWN_SN_TEFAS_OC = 30
+        cooldown_aktif_tefas_oc = False
+        bekleme_kalan_tefas_oc = 0
+        if son_cekim_zamani_tefas_oc is not None:
+            gecen_sn_tefas_oc = (_dt_tefas_oc.now() - son_cekim_zamani_tefas_oc).total_seconds()
+            if gecen_sn_tefas_oc < COOLDOWN_SN_TEFAS_OC:
+                cooldown_aktif_tefas_oc = True
+                bekleme_kalan_tefas_oc = int(COOLDOWN_SN_TEFAS_OC - gecen_sn_tefas_oc)
+
+        # --- Çekim butonu ---
+        if toplam_fon_sayisi_tefas_oc == 0:
+            st.info(
+                "Portföyde tanımlı yatırım fonu yok. Otomatik çekim için önce "
+                "**➕ Varlık Ekle** sayfasından bir Yatırım Fonu varlığı tanımlayın."
+            )
+        else:
+            buton_disabled_tefas_oc = cooldown_aktif_tefas_oc
+            buton_label_tefas_oc = "🔄 TEFAS'tan Otomatik Çek"
+            if cooldown_aktif_tefas_oc:
+                buton_label_tefas_oc = f"⏳ Cooldown ({bekleme_kalan_tefas_oc} sn)"
+
+            if st.button(
+                buton_label_tefas_oc,
+                type="primary",
+                key="tefas_oc_cek_btn",
+                disabled=buton_disabled_tefas_oc,
+                use_container_width=True,
+            ):
+                # --- Çekim akışı ---
+                from fiyat_cek import tefas_fiyatlari_cek
+
+                # Streamlit progress bar
+                ilerleme_bar_tefas_oc = st.progress(0.0, text="Başlatılıyor...")
+
+                def _ilerleme_tefas_oc(sira, toplam, kod, durum_str):
+                    """Streamlit progress callback."""
+                    yuzde = sira / toplam
+                    ilerleme_bar_tefas_oc.progress(
+                        yuzde,
+                        text=f"({sira}/{toplam}) {kod} — {durum_str}",
+                    )
+
+                try:
+                    basari_tefas_oc, hata_tefas_oc = tefas_fiyatlari_cek(
+                        ilerleme_callback=_ilerleme_tefas_oc
+                    )
+                except Exception as e_tefas_oc:
+                    ilerleme_bar_tefas_oc.empty()
+                    st.error(f"❌ Çekim sırasında beklenmedik hata: {e_tefas_oc}")
+                    basari_tefas_oc, hata_tefas_oc = [], []
+
+                ilerleme_bar_tefas_oc.empty()
+
+                # Cooldown zamanını kaydet
+                st.session_state["tefas_son_otomatik_cekim"] = _dt_tefas_oc.now()
+
+                # --- Sonuç özeti ---
+                if basari_tefas_oc:
+                    toplam_kayit_tefas_oc = sum(r[1] for r in basari_tefas_oc)
+                    st.success(
+                        f"✅ {len(basari_tefas_oc)} fon başarıyla çekildi "
+                        f"(toplam {toplam_kayit_tefas_oc} fiyat kaydı)."
+                    )
+
+                    # Başarı detayları tablo halinde
+                    with st.expander("📋 Çekilen fonlar", expanded=False):
+                        basari_df_tefas_oc = pd.DataFrame(
+                            basari_tefas_oc,
+                            columns=["Fon Kodu", "Kayıt Sayısı", "Son Tarih"],
+                        )
+                        st.dataframe(
+                            basari_df_tefas_oc,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                if hata_tefas_oc:
+                    st.warning(
+                        f"⚠️ {len(hata_tefas_oc)} fon çekilemedi. "
+                        f"Manuel kontrol için aşağıdaki listeye bakın."
+                    )
+
+                    # Hata detayları tablo halinde
+                    with st.expander("🔍 Çekilemeyen fonlar", expanded=True):
+                        hata_df_tefas_oc = pd.DataFrame(
+                            hata_tefas_oc,
+                            columns=["Fon Kodu", "Tip", "Mesaj"],
+                        )
+                        st.dataframe(
+                            hata_df_tefas_oc,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                # 1.5 sn sonra rerun (son fiyatlar tablosunu yenilemek için)
+                if basari_tefas_oc:
+                    import time as _time_tefas_oc
+                    _time_tefas_oc.sleep(1.5)
+                    st.rerun()
+
+        if cooldown_aktif_tefas_oc:
+            st.caption(
+                f"⏳ Tekrar çekmek için **{bekleme_kalan_tefas_oc} sn** beklemelisin "
+                f"(sunucuya nezaket için)."
+            )
+
+            
         # ==========================================
         # DOSYADAN YÜKLE (TEFAS CSV)
         # ==========================================

@@ -59,7 +59,7 @@ def veritabani_olustur():
     # --- Fiyat geçmişi tablosu ---
     # Günlük kapanış fiyatları burada tutulur.
     # kaynak alanı: 'manuel', 'yahoo', 'yahoo-bist', 'yahoo-kripto', 'yahoo-altin',
-    #                'tefas' gibi değerler alır.
+    #                'tefas' (manuel CSV import), 'tefas-api' (otomatik endpoint çekim).
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fiyat_gecmisi (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +188,37 @@ def veritabani_olustur():
         )
     """)
 
+    # --- TEFAS fon detay tablosu (Aşama 6.B.1) ---
+    # TEFAS endpoint'inden çekilen fon-spesifik metadata burada tutulur.
+    # Fiyat verisi `fiyat_gecmisi` tablosuna yazılmaya devam eder (mevcut akış);
+    # bu tablo SADECE fon-spesifik ekstra alanlar içindir (yatırımcı sayısı, fon
+    # büyüklüğü vs.). Böylece `fiyat_gecmisi` sade kalır, ileride fon analizi
+    # geliştirileceğinde bu tablo tek başına yeterli olur.
+    #
+    # Bağ: fon_kodu = varliklar.kod (string eşleşmesi).
+    # UNIQUE(fon_kodu, tarih) → günde tek kayıt, INSERT OR REPLACE ile güncel veri kazanır.
+    #
+    # Alanlar (TEFAS API mapping):
+    #   fon_adi            ← fonUnvan             (kaynak doğrulama için)
+    #   tedavul_pay        ← tedPaySayisi         (tedavüldeki pay sayısı)
+    #   kisi_sayisi        ← kisiSayisi           (yatırımcı sayısı)
+    #   portfoy_buyukluk   ← portfoyBuyukluk      (toplam fon büyüklüğü, TL)
+    #   borsa_bulten_fiyat ← borsaBultenFiyat     (genelde YAT'ta NULL, BYF'de dolu)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tefas_fon_detay (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            fon_kodu           TEXT NOT NULL,
+            tarih              TEXT NOT NULL,
+            fon_adi            TEXT,
+            tedavul_pay        INTEGER,
+            kisi_sayisi        INTEGER,
+            portfoy_buyukluk   REAL,
+            borsa_bulten_fiyat REAL,
+            kaynak             TEXT DEFAULT 'tefas-api',
+            UNIQUE(fon_kodu, tarih)
+        )
+    """)
+
     baglanti.commit()
     senkronize_et()
     print("Veritabanı tabloları hazır.")
@@ -209,13 +240,18 @@ if __name__ == "__main__":
         except:
             print(f"'islemler.{sutun}' sütunu zaten mevcut, atlandı.")
 
-    # viop_fiyat_gecmisi tablosu için — YENİ (Aşama 5.5.A)
+    # viop_fiyat_gecmisi tablosu için — Aşama 5.5.A
     for sutun, tip in [("initial_margin", "REAL")]:
         try:
             cursor.execute(f"ALTER TABLE viop_fiyat_gecmisi ADD COLUMN {sutun} {tip}")
             print(f"'viop_fiyat_gecmisi.{sutun}' sütunu eklendi.")
         except:
             print(f"'viop_fiyat_gecmisi.{sutun}' sütunu zaten mevcut, atlandı.")
+
+    # tefas_fon_detay tablosu için — Aşama 6.B.1
+    # Yeni tablo olduğu için ALTER TABLE migration'a gerek yok;
+    # veritabani_olustur() içindeki CREATE TABLE IF NOT EXISTS yeterli.
+    # (Bu yorum tamamen bilgi amaçlı — kod buraya yazılmadı, yazılması da gerekmiyor.)
 
     baglanti.commit()
     senkronize_et()

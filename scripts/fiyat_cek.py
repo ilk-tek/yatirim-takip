@@ -1,12 +1,13 @@
 # ============================================================
-# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST Hisse + Kripto + Fiziki Altın + VIOP
+# OTOMATİK FİYAT ÇEK — Yabancı Hisse + BIST + Kripto + Fiziki Altın + VIOP + TEFAS
 # ============================================================
 # Yabancı hisse fiyatlarını Yahoo Finance'tan,
 # BIST hisse fiyatlarını Yahoo Finance'tan (.IS suffix ile),
 # kripto varlık fiyatlarını Yahoo Finance'tan (-USD suffix ile),
-# fiziki altın fiyatlarını ons altın fiyatından hesaplayarak
-# VIOP sözleşme fiyatlarını İş Yatırım endpoint'inden
-# fiyat_gecmisi / viop_fiyat_gecmisi tablolarına yazar.
+# fiziki altın fiyatlarını ons altın fiyatından hesaplayarak,
+# VIOP sözleşme fiyatlarını İş Yatırım endpoint'inden,
+# TEFAS yatırım fonlarını tefas.gov.tr resmi API'sinden
+# fiyat_gecmisi / viop_fiyat_gecmisi / tefas_fon_detay tablolarına yazar.
 #
 # KULLANIM (proje kök klasöründen):
 #   python scripts/fiyat_cek.py                        -> bugünkü fiyatlar
@@ -16,12 +17,16 @@
 #   python scripts/fiyat_cek.py --sadece-kripto
 #   python scripts/fiyat_cek.py --sadece-altin
 #   python scripts/fiyat_cek.py --sadece-viop
+#   python scripts/fiyat_cek.py --sadece-tefas
 #   python scripts/fiyat_cek.py --sadece-bist --baslangic 2022-03-01
 #
 # NOT: Altın fiyatları "eritme değeri" üzerinden hesaplanır.
 #      Piyasadaki gerçek fiyat %3-10 daha yüksek olabilir (işçilik/prim).
 # NOT: VIOP çekimi sadece "bugünkü fiyat" modunda çalışır
 #      (endpoint geçmiş veri sağlamıyor — her zaman güncel snapshot).
+# NOT: TEFAS çekimi her zaman son 30 günü kapsar (endpoint sınırı 1 ay).
+#      Daha eski veri için data/tefas/ klasörüne CSV koyup
+#      tefas_import.py kullanın.
 # ============================================================
 
 import sys
@@ -101,6 +106,65 @@ ISYATIRIM_BEKLEME_SN = 0.3
 
 # HTTP timeout süresi (saniye)
 ISYATIRIM_TIMEOUT_SN = 10
+
+
+# ============================================================
+# TEFAS FON ENDPOINT TANIMLARI (Aşama 6.B.2)
+# ============================================================
+# TEFAS'ın yeni resmi API'si (tefas.gov.tr/api/funds/...) tek bir fon kodu
+# alır ve verilen tarih aralığı için günlük fiyat + fon metadata'sını
+# JSON olarak döndürür.
+#
+# Endpoint:
+#   POST https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir
+#
+# Tek istek sınırı: max ~30 gün (TEFAS API'sinin doğal sınırı).
+# Rate limit: dakikada ~6 istek (anti-bot için yumuşak sınır).
+# Authorization gerektirmez, browser-benzeri header yeterli.
+#
+# Hata durumunda (örn. geçersiz fon kodu):
+#   resultList=[] + errorMessage="Index 0 out of bounds for length 0"
+#   (HTTP 200, error response gibi davranır — İş Yatırım pattern'iyle aynı)
+# ============================================================
+
+TEFAS_URL = "https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir"
+
+# Browser-benzeri başlıklar (anti-bot kontrolünü geçmek için)
+TEFAS_HEADERS = {
+    "Accept": "*/*",
+    "Content-Type": "application/json",
+    "Origin": "https://www.tefas.gov.tr",
+    "Referer": "https://www.tefas.gov.tr/tr/fon-verileri",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/146.0.0.0 Safari/537.36"
+    ),
+}
+
+# Her HTTP isteği arasında bekleme süresi (saniye)
+# TEFAS rate-limit'i sıkı: 6-7 hızlı istek sonrası 429 atıyor.
+# 3 sn = dakikada 20 istek; testle bulduğumuz güvenli alt sınır.
+TEFAS_BEKLEME_SN = 3.0
+
+# 429 (rate-limit) yedikten sonra bekleme süresi (saniye)
+# Bu süre boyunca açık DB transaction'ı KAPATILMIŞ olmalı, aksi halde stream timeout.
+TEFAS_429_BACKOFF_SN = 60
+
+# Her N fonda bir Turso stream'i resetle (timeout önleme)
+TEFAS_STREAM_RESET_ARALIGI = 5
+
+# HTTP timeout süresi (saniye)
+TEFAS_TIMEOUT_SN = 15
+
+# Tek çekimde kaç gün geriye gidilecek (TEFAS sınırı 30 gün)
+TEFAS_GUN_GERIYE = 30
+
+# DB'deki varlık türünden TEFAS API fonTipi'ne eşleme
+TEFAS_TIP_ESLESMESI = {
+    "Yatırım Fonu": "YAT",
+    "BES Fonu":     "EMK",
+}
 
 
 # ============================================================
@@ -729,6 +793,283 @@ def viop_fiyatlari_cek_isyatirim(ilerleme_callback=None):
 
 
 # ============================================================
+# TEFAS FON FİYATLARI — RESMI API (Aşama 6.B.2)
+# ============================================================
+# DB'deki tüm 'Yatırım Fonu' (ve ileride 'BES Fonu') türündeki varlıkları
+# tarayıp her birini TEFAS endpoint'inden ayrı ayrı çeker.
+#
+# Tasarım kararları:
+# - Per-fund POST isteği (İş Yatırım VIOP pattern'i ile birebir aynı)
+# - Sabit son 30 gün look-back (basit, INSERT OR IGNORE duplikatları atar)
+# - Fiyat       → fiyat_gecmisi   (INSERT OR IGNORE)
+# - Metadata    → tefas_fon_detay (INSERT OR REPLACE)
+# - Her 10 fonda bir batched commit + senkronize + stream reset (Turso pattern)
+# - Aralara 0.5 sn nezaket sleep
+# - Streamlit'ten çağrı için ilerleme callback'i (opsiyonel)
+# ============================================================
+
+def _tefas_tek_fon_cek(fon_kodu, fon_tipi="YAT"):
+    """
+    Tek bir TEFAS fonu için endpoint'ten son 30 günlük veriyi çeker.
+
+    Geri dönüş:
+      ('ok',     [satir_dict, ...])  başarı (1+ satır)
+      ('bos',    'mesaj')            fon bulunamadı / hafta sonu / boş aralık
+      ('429',    'mesaj')            rate-limit — dış döngü stream kapatıp beklesin
+      ('hata',   'mesaj')            network / HTTP / parse hatası
+
+    NOT: HTTP 429 burada retry edilmez — dış döngüye sinyal verilir,
+    böylece açık DB transaction'ı bekleme sırasında timeout olmaz.
+    """
+    bugun = date.today()
+    bitis = bugun.strftime("%Y%m%d")
+    baslangic = (bugun - timedelta(days=TEFAS_GUN_GERIYE)).strftime("%Y%m%d")
+
+    body = {
+        "fonTipi":         fon_tipi,
+        "fonKodu":         fon_kodu,
+        "aramaMetni":      None,
+        "fonTurKod":       None,
+        "fonGrubu":        None,
+        "sfonTurKod":      None,
+        "fonTurAciklama":  None,
+        "kurucuKod":       None,
+        "basTarih":        baslangic,
+        "bitTarih":        bitis,
+        "basSira":         1,
+        "bitSira":         100000,
+        "dil":             "TR",
+        "sFonTurKod":      "",
+        "fonKod":          "",
+        "fonGrup":         "",
+        "fonUnvanTip":     "",
+    }
+
+    # --- HTTP isteği ---
+    try:
+        response = requests.post(
+            TEFAS_URL,
+            headers=TEFAS_HEADERS,
+            json=body,
+            timeout=TEFAS_TIMEOUT_SN,
+        )
+    except requests.exceptions.Timeout:
+        return ("hata", f"Timeout ({TEFAS_TIMEOUT_SN} sn)")
+    except requests.exceptions.RequestException as e:
+        return ("hata", f"Network: {e}")
+
+    # --- HTTP 429 → rate-limit, dış döngüye bildirilsin ---
+    if response.status_code == 429:
+        return ("429", "Rate-limit")
+
+    if response.status_code != 200:
+        return ("hata", f"HTTP {response.status_code}")
+
+    # --- JSON parse ---
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        return ("hata", "JSON parse hatası")
+
+    # --- Boş cevap / geçersiz fon kodu sinyali ---
+    rows = data.get("resultList") or []
+    if not rows:
+        err_msg = data.get("errorMessage") or "Boş cevap"
+        return ("bos", err_msg)
+
+    return ("ok", rows)
+
+
+def tefas_fiyatlari_cek(ilerleme_callback=None):
+    """
+    DB'deki tüm Yatırım Fonu (ve BES Fonu) türündeki varlıkların fiyatlarını
+    TEFAS resmi API'sinden çeker.
+
+    Geri dönüş:
+      (basari_listesi, hata_listesi)
+
+    OPTIMIZASYON NOTU (Multi-VALUES):
+      libsql_experimental embedded replica modunda her tek tek INSERT,
+      Turso bulut'una ayrı bir Hrana stream round-trip yapıyor (~350ms/INSERT).
+      Bunun yerine 'VALUES (?,?), (?,?), ...' formatıyla TEK SQL içinde
+      multi-row INSERT kullanıyoruz — 12x daha hızlı.
+      (executemany aynı performansı vermiyor; arka planda 40 ayrı execute yapıyor.)
+    """
+    print(f"\n[TEFAS] Resmi API'den fon fiyatları çekiliyor "
+          f"(son {TEFAS_GUN_GERIYE} gün)...")
+
+    # --- DB'deki fon varlıklarını çek ---
+    baglanti = baglan()
+    cursor = baglanti.cursor()
+    cursor.execute("""
+        SELECT id, kod, tur
+        FROM varliklar
+        WHERE tur IN ('Yatırım Fonu', 'BES Fonu')
+        ORDER BY tur, kod
+    """)
+    fonlar = cursor.fetchall()
+
+    if not fonlar:
+        print("  [TEFAS] Portföyde yatırım fonu / BES fonu yok, çekim atlanıyor.")
+        return ([], [])
+
+    print(f"  {len(fonlar)} fon bulundu, çekiliyor...")
+
+    basari_listesi = []
+    hata_listesi = []
+    toplam = len(fonlar)
+
+    # --- Turso stream timeout fix ---
+    db._baglanti = None
+    baglanti = baglan()
+    cursor = baglanti.cursor()
+
+    # Her 10 fonda bir commit + sync + stream reset (Turso pattern)
+    COMMIT_ARALIGI = 10
+    fon_ardisik_basari = 0
+
+    for sira, (varlik_id, kod, tur) in enumerate(fonlar, 1):
+        fon_tipi = TEFAS_TIP_ESLESMESI.get(tur, "YAT")
+
+        durum, sonuc = _tefas_tek_fon_cek(kod, fon_tipi)
+
+        # --- 429 (rate-limit) özel yönetimi ---
+        # Açık transaction'ı KAPAT (commit + sync) — sonra bekle (stream timeout önleme).
+        # Backoff sonrası SAME fonu yeniden dener.
+        if durum == "429":
+            print(f"  ⏸ ({sira}/{toplam}) {kod} → HTTP 429 (rate-limit)")
+            print(f"     Açık transaction kapatılıyor (stream timeout önleme)...")
+            try:
+                baglanti.commit()
+                senkronize_et()
+            except Exception as e:
+                print(f"     Uyarı: commit/sync sırasında hata: {e}")
+            db._baglanti = None
+            print(f"     {TEFAS_429_BACKOFF_SN}s bekleniyor...")
+            time.sleep(TEFAS_429_BACKOFF_SN)
+            # Yeni bağlantı aç ve aynı fonu retry et
+            baglanti = baglan()
+            cursor = baglanti.cursor()
+            fon_ardisik_basari = 0  # commit yaptık, sayacı sıfırla
+            durum, sonuc = _tefas_tek_fon_cek(kod, fon_tipi)
+            print(f"     Backoff sonrası retry → durum: {durum}")
+
+        if durum == "ok":
+            rows = sonuc
+
+            # 1) fiyat_gecmisi için Multi-VALUES INSERT
+            #    Önce geçerli satırları topla, sonra tek SQL'de yaz
+            fiyat_satirlari = []  # [(varlik_id, tarih, fiyat, kaynak), ...]
+            detay_satirlari = []  # [(fon_kodu, tarih, ...), ...]
+
+            for row in rows:
+                tarih = row.get("tarih")
+                fiyat = row.get("fiyat")
+
+                if tarih is None or fiyat is None:
+                    continue
+
+                fiyat_satirlari.append(
+                    (varlik_id, tarih, fiyat, "tefas-api")
+                )
+                detay_satirlari.append((
+                    kod,
+                    tarih,
+                    row.get("fonUnvan"),
+                    row.get("tedPaySayisi"),
+                    row.get("kisiSayisi"),
+                    row.get("portfoyBuyukluk"),
+                    row.get("borsaBultenFiyat"),
+                    "tefas-api",
+                ))
+
+            eklenen_kayit = len(fiyat_satirlari)
+
+            if eklenen_kayit > 0:
+                # 1) fiyat_gecmisi: Multi-VALUES INSERT OR IGNORE
+                fiyat_placeholder = ", ".join(["(?, ?, ?, ?)"] * len(fiyat_satirlari))
+                fiyat_sql = f"""
+                    INSERT OR IGNORE INTO fiyat_gecmisi
+                        (varlik_id, tarih, fiyat, kaynak)
+                    VALUES {fiyat_placeholder}
+                """
+                fiyat_params = []
+                for satir in fiyat_satirlari:
+                    fiyat_params.extend(satir)
+                cursor.execute(fiyat_sql, fiyat_params)
+
+                # 2) tefas_fon_detay: Multi-VALUES INSERT OR REPLACE
+                detay_placeholder = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(detay_satirlari))
+                detay_sql = f"""
+                    INSERT OR REPLACE INTO tefas_fon_detay
+                        (fon_kodu, tarih, fon_adi, tedavul_pay,
+                         kisi_sayisi, portfoy_buyukluk, borsa_bulten_fiyat, kaynak)
+                    VALUES {detay_placeholder}
+                """
+                detay_params = []
+                for satir in detay_satirlari:
+                    detay_params.extend(satir)
+                cursor.execute(detay_sql, detay_params)
+
+            son_tarih = rows[0].get("tarih", "?") if rows else "?"
+            basari_listesi.append((kod, eklenen_kayit, son_tarih))
+            fon_ardisik_basari += 1
+            print(f"  ✅ ({sira}/{toplam}) {kod} → "
+                  f"{eklenen_kayit} kayıt (son: {son_tarih})")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"OK: {eklenen_kayit} kayıt")
+
+        elif durum == "bos":
+            hata_listesi.append((kod, "bos", sonuc))
+            print(f"  ⚠️ ({sira}/{toplam}) {kod} → {sonuc}")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"Bulunamadı: {sonuc}")
+
+        else:  # hata veya retry sonrası hâlâ 429
+            # Retry sonrası hâlâ 429 ise 'hata' olarak işaretle
+            hata_mesaji = f"HTTP 429 (retry sonrası)" if durum == "429" else str(sonuc)
+            hata_listesi.append((kod, "hata", hata_mesaji))
+            print(f"  ❌ ({sira}/{toplam}) {kod} → {hata_mesaji}")
+
+            if ilerleme_callback:
+                ilerleme_callback(sira, toplam, kod, f"Hata: {hata_mesaji}")
+
+        # Her COMMIT_ARALIGI başarılı fonda toplu commit + sync + stream reset
+        if fon_ardisik_basari >= COMMIT_ARALIGI:
+            baglanti.commit()
+            senkronize_et()
+            db._baglanti = None
+            baglanti = baglan()
+            cursor = baglanti.cursor()
+            fon_ardisik_basari = 0
+            print(f"  💾 Ara commit + sync ({sira}/{toplam})")
+        # Veya: hata fırtınası varken bile her N fonda bir stream reset
+        # (commit yapılmadan, sadece bağlantıyı tazele — stream timeout önleme)
+        elif sira % TEFAS_STREAM_RESET_ARALIGI == 0:
+            baglanti.commit()  # şu ana kadarki başarılı INSERT'leri commit et
+            db._baglanti = None
+            baglanti = baglan()
+            cursor = baglanti.cursor()
+
+        if sira < toplam:
+            time.sleep(TEFAS_BEKLEME_SN)
+
+    # Döngü bitti — kalan satırlar varsa final commit
+    if fon_ardisik_basari > 0:
+        baglanti.commit()
+        print(f"  💾 Final commit ({fon_ardisik_basari} fon)")
+
+    senkronize_et()
+    db._baglanti = None
+
+    print(f"\n  Toplam: {len(basari_listesi)} başarılı, "
+          f"{len(hata_listesi)} hatalı/eksik")
+    return (basari_listesi, hata_listesi)
+
+
+# ============================================================
 # ANA FONKSİYONLAR
 # ============================================================
 
@@ -750,9 +1091,22 @@ def tum_fiyatlari_cek(baslangic_tarihi=None):
     kripto_sayisi = kripto_fiyatlari_cek(baslangic_tarihi)
     altin_sayisi  = altin_fiyatlari_cek(baslangic_tarihi)
 
-    toplam = hisse_sayisi + bist_sayisi + kripto_sayisi + altin_sayisi
+    # TEFAS çekimi sadece "bugünkü fiyat" modunda yapılır.
+    # Endpoint son 30 günü kapsıyor; daha eski tarih için CSV import var.
+    if baslangic_tarihi is None:
+        tefas_basari, _tefas_hata = tefas_fiyatlari_cek()
+        tefas_kayit_sayisi = sum(r[1] for r in tefas_basari)
+    else:
+        print("\n⚠️  TEFAS çekimi geçmiş modda yapılmıyor "
+              "(CSV import kullanın: tefas_import.py).")
+        tefas_kayit_sayisi = 0
+
+    toplam = (hisse_sayisi + bist_sayisi + kripto_sayisi
+              + altin_sayisi + tefas_kayit_sayisi)
     print("\n" + "=" * 50)
-    print(f"TOPLAM: {hisse_sayisi} yabancı hisse + {bist_sayisi} BIST + {kripto_sayisi} kripto + {altin_sayisi} altın = {toplam} kayıt")
+    print(f"TOPLAM: {hisse_sayisi} yabancı hisse + {bist_sayisi} BIST + "
+          f"{kripto_sayisi} kripto + {altin_sayisi} altın + "
+          f"{tefas_kayit_sayisi} TEFAS = {toplam} kayıt")
     return toplam
 
 
@@ -777,5 +1131,10 @@ if __name__ == "__main__":
         if baslangic:
             print(f"⚠️  VIOP geçmiş veri desteklemiyor, --baslangic '{baslangic}' yoksayılıyor.")
         viop_fiyatlari_cek_isyatirim()
+    elif "--sadece-tefas" in sys.argv:
+        # TEFAS son 30 gün ile sınırlı; --baslangic parametresi yoksayılır
+        if baslangic:
+            print(f"⚠️  TEFAS son 30 gün ile sınırlı, --baslangic '{baslangic}' yoksayılıyor.")
+        tefas_fiyatlari_cek()
     else:
         tum_fiyatlari_cek(baslangic)
