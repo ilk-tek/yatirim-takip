@@ -996,7 +996,7 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
                 fiyat_params = []
                 for satir in fiyat_satirlari:
                     fiyat_params.extend(satir)
-                cursor.execute(fiyat_sql, fiyat_params)
+                cursor.execute(fiyat_sql, tuple(fiyat_params))
 
                 # 2) tefas_fon_detay: Multi-VALUES INSERT OR REPLACE
                 detay_placeholder = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(detay_satirlari))
@@ -1009,7 +1009,7 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
                 detay_params = []
                 for satir in detay_satirlari:
                     detay_params.extend(satir)
-                cursor.execute(detay_sql, detay_params)
+                cursor.execute(detay_sql, tuple(detay_params))
 
             son_tarih = rows[0].get("tarih", "?") if rows else "?"
             basari_listesi.append((kod, eklenen_kayit, son_tarih))
