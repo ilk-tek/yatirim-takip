@@ -5709,6 +5709,9 @@ elif sayfa == "💱 Fiyat Güncelle":
                     kur_cek_ve_kaydet(bugun_str)
                 except Exception as e:
                     st.warning(f"Kur güncellenemedi: {e}")
+                # Stream timeout önleme: kur yazımı sonrası bağlantıyı sıfırla
+                import db as _db_mod
+                _db_mod._baglanti = None
                 sayi = tum_fiyatlari_cek()
             if sayi > 0:
                 st.success(f"✅ Toplam {sayi} fiyat güncellendi, kurlar da yenilendi!")
