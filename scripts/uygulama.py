@@ -393,7 +393,7 @@ if sayfa == "📊 Portföy":
             st.markdown("---")
             st.subheader("Portföy Özeti")
 
-            # Varlık bazlı aracı kurum bilgisi (en çok kullanılan)
+# Varlık × aracı kurum bazında net pozisyon (oransal dağıtım için)
             baglanti_ak = veritabani_baglan()
             ak_bilgi = sql_oku("""
                 SELECT varlik_id,
@@ -405,22 +405,23 @@ if sayfa == "📊 Portföy":
                 HAVING net > 0
             """, baglanti_ak)
 
-            # Varlık → aracı kurum eşlemesi (en büyük pozisyon)
-            varlik_araci = {}
+            # varlik_id → {aracı_kurum: net_adet} haritası.
+            # Bir varlık birden fazla kurumda olabilir; hepsini saklıyoruz.
+            # Bu harita, aşağıdaki pie chart'ta varlık değerini kurumlara ORANSAL
+            # dağıtmak için kullanılır. Değer = net_adet × fiyat × kur olduğundan ve
+            # fiyat/kur varlık için sabit olduğundan, net paya göre bölmek birebir
+            # doğru sonuç verir (yaklaşık değil).
+            varlik_ak_net = {}
             if not ak_bilgi.empty:
-                for vid in ak_bilgi["varlik_id"].unique():
-                    vid_df = ak_bilgi[ak_bilgi["varlik_id"] == vid]
-                    en_buyuk = vid_df.loc[vid_df["net"].idxmax()]
-                    ak = en_buyuk["araci_kurum"]
-                    varlik_araci[vid] = ak if ak else "Belirtilmemiş"
+                for _, r in ak_bilgi.iterrows():
+                    vid = r["varlik_id"]
+                    ak  = r["araci_kurum"] if r["araci_kurum"] else "Belirtilmemiş"
+                    varlik_ak_net.setdefault(vid, {})[ak] = r["net"]
 
-            # ozet_df'e aracı kurum ekle
-            ozet_df["Aracı Kurum"] = ozet_df.apply(
-                lambda r: varlik_araci.get(
-                    df[df["kod"] == r["Kod"]]["id"].values[0], "Belirtilmemiş"
-                ) if len(df[df["kod"] == r["Kod"]]) > 0 else "Belirtilmemiş",
-                axis=1
-            )
+            # NOT (C seçimi): Özet tablosunda varlık başına tek satır olduğu için,
+            # birden fazla kuruma yayılan varlıkta tek kurum adı yazmak yanıltıcıydı.
+            # "Aracı Kurum" kolonu bu tablodan kaldırıldı; kurum kırılımı için
+            # 🏦 Aracı Kurum sayfası kullanılır.
 
             portfoy_toplam_tl = ozet_df["Değer (TL)"].sum()
 
@@ -477,7 +478,6 @@ if sayfa == "📊 Portföy":
                                 "Kod", "Ad", "PB", "Adet",
                                 "Maliyet (TL)", "Değer (TL)",
                                 "Kâr/Zarar (TL)", "Getiri %",
-                                "Değer (USD)", "Aracı Kurum"
                             ]].copy()
                             goster = goster.sort_values("Değer (TL)", ascending=False)
                             st.dataframe(
@@ -593,8 +593,30 @@ if sayfa == "📊 Portföy":
                 # VIOP'u "Spekülatif" exposure'a ekle (varsa) veya yeni anahtar yarat
                 exp_data["Spekülatif"] = exp_data.get("Spekülatif", 0) + viop_ozet["deger_tl"]
 
-            # --- Aracı Kurum verisini topla ---
-            ak_data = ozet_df.groupby("Aracı Kurum")["Değer (TL)"].sum().to_dict()
+            # --- Aracı Kurum verisini topla (ORANSAL DAĞITIM) ---
+            # Her varlığın toplam TL değerini, o varlığın kurumlardaki net payına
+            # göre böl. Böylece aynı varlık birden fazla kurumdaysa değer doğru
+            # şekilde her kuruma dağılır (eski hâlde hepsi tek kuruma yazılıyordu).
+            ak_data = {}
+            for _, satir in ozet_df.iterrows():
+                eslesme = df[df["kod"] == satir["Kod"]]
+                if len(eslesme) == 0:
+                    ak_data["Belirtilmemiş"] = ak_data.get("Belirtilmemiş", 0) + satir["Değer (TL)"]
+                    continue
+
+                vid           = eslesme["id"].values[0]
+                kurum_netleri = varlik_ak_net.get(vid, {})
+                toplam_net    = sum(kurum_netleri.values())
+
+                if not kurum_netleri or toplam_net <= 0:
+                    # Kurum bilgisi yoksa tek kalemde göster
+                    ak_data["Belirtilmemiş"] = ak_data.get("Belirtilmemiş", 0) + satir["Değer (TL)"]
+                    continue
+
+                # Değeri kurumlara net paya göre dağıt
+                for kurum, net in kurum_netleri.items():
+                    pay = satir["Değer (TL)"] * (net / toplam_net)
+                    ak_data[kurum] = ak_data.get(kurum, 0) + pay
             if viop_ozet["var_mi"]:
                 # VIOP'un aracı kurum dağılımını da ekle
                 for ak_v, ak_d in viop_ozet["araci_kurum_dagilim"].items():
