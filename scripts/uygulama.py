@@ -4947,7 +4947,7 @@ elif sayfa == "💰 İşlem Ekle":
             with col1:
                 st.markdown(f"**Seçili Varlık:** {secilen_varlik_adi}")
                 islem_turu = st.selectbox("İşlem Türü", [
-                    "Alış", "Satış", "Temettü", "Faiz", "Komisyon", "Dış Giriş", "Dış Çıkış"
+                    "Alış", "Satış"
                 ])
                 tarih = st.date_input("İşlem Tarihi", value=date.today())
 
@@ -5024,7 +5024,7 @@ elif sayfa == "✏️ İşlem Düzenle":
         st.markdown("---")
         st.subheader("Bilgileri Güncelle")
 
-        islem_turu_listesi = ["Alış", "Satış", "Temettü", "Faiz", "Komisyon", "Dış Giriş", "Dış Çıkış"]
+        islem_turu_listesi = ["Alış", "Satış"]
 
         # ==========================================
         # YENİ ARACI KURUM / ETİKET EKLEME (form dışında)
@@ -5181,7 +5181,7 @@ elif sayfa == "📤 İşlem Yükle":
             ["Sütun", "Zorunlu?", "Açıklama", "Örnek Değerler"],
             ["kod", "EVET", "Varlık kodu (varliklar tablosundaki kod)", "AAPL, GARAN, BTC"],
             ["tarih", "EVET", "İşlem tarihi (YYYY-MM-DD formatında)", "2025-06-15"],
-            ["islem_turu", "EVET", "İşlem türü", "Alış, Satış, Temettü, Faiz, Komisyon"],
+            ["islem_turu", "EVET", "İşlem türü", "Alış, Satış"],
             ["adet", "EVET", "Miktar (mevduatta bakiye tutarı)", "10, 0.5, 50000"],
             ["fiyat", "EVET", "Birim fiyat (mevduatta 1 yazın)", "235.50, 1, 0.0045"],
             ["notlar", "HAYIR", "Açıklama (boş bırakılabilir)", "İlk alım, Temettü ödemesi"],
@@ -5266,7 +5266,7 @@ elif sayfa == "📤 İşlem Yükle":
                     kod_id_map = dict(zip(varliklar_db["kod"], varliklar_db["id"]))
                     kod_tur_map = dict(zip(varliklar_db["kod"], varliklar_db["tur"]))
 
-                    gecerli_turler = {"Alış", "Satış", "Temettü", "Faiz", "Komisyon", "Dış Giriş", "Dış Çıkış"}
+                    gecerli_turler = {"Alış", "Satış"}
 
                     hatalar = []
                     gecerli_satirlar = []
