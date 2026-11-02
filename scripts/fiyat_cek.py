@@ -255,6 +255,7 @@ def hisse_fiyatlari_cek(baslangic_tarihi=None):
                 pass
 
     senkronize_et()
+    db._baglanti = None   # yazma + sync sonrası bağlantıyı sıfırla (sonraki SELECT'ler için)
     return toplam_eklenen
 
 
@@ -352,6 +353,7 @@ def bist_fiyatlari_cek(baslangic_tarihi=None):
                 pass
 
     senkronize_et()
+    db._baglanti = None   # yazma + sync sonrası bağlantıyı sıfırla (sonraki SELECT'ler için)
     return toplam_eklenen
 
 
@@ -447,6 +449,7 @@ def kripto_fiyatlari_cek(baslangic_tarihi=None):
                 pass
 
     senkronize_et()
+    db._baglanti = None   # yazma + sync sonrası bağlantıyı sıfırla (sonraki SELECT'ler için)
     return toplam_eklenen
 
 
@@ -1010,6 +1013,10 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
                 for satir in detay_satirlari:
                     detay_params.extend(satir)
                 cursor.execute(detay_sql, tuple(detay_params))
+                # Fonun verisini HEMEN kalıcı yap.
+                # Böylece sonraki 3 sn bekleme + TEFAS isteği sırasında
+                # açık transaction kalmaz, Turso stream'i zaman aşımına düşmez.
+                baglanti.commit()
 
             son_tarih = rows[0].get("tarih", "?") if rows else "?"
             basari_listesi.append((kod, eklenen_kayit, son_tarih))
@@ -1036,20 +1043,21 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
             if ilerleme_callback:
                 ilerleme_callback(sira, toplam, kod, f"Hata: {hata_mesaji}")
 
-        # Her COMMIT_ARALIGI başarılı fonda toplu commit + sync + stream reset
+        # Her COMMIT_ARALIGI başarılı fonda bir sync + stream reset.
+        # Commit artık her fondan sonra yapılıyor, burada bekleyen veri yok.
         if fon_ardisik_basari >= COMMIT_ARALIGI:
-            baglanti.commit()
-            senkronize_et()
-            db._baglanti = None
-            baglanti = baglan()
+            try:
+                senkronize_et()
+            except Exception as e:
+                print(f"     Uyarı: sync sırasında hata: {e}")
+            db._baglanti = None          # eski bağlantıyı bırak
+            baglanti = baglan()          # taze bağlantı aç
             cursor = baglanti.cursor()
             fon_ardisik_basari = 0
-            print(f"  💾 Ara commit + sync ({sira}/{toplam})")
-        # Veya: hata fırtınası varken bile her N fonda bir stream reset
-        # (commit yapılmadan, sadece bağlantıyı tazele — stream timeout önleme)
+            print(f"  💾 Ara sync + stream reset ({sira}/{toplam})")
+        # Hata ağırlıklı dönemlerde de her N fonda bir bağlantıyı tazele
         elif sira % TEFAS_STREAM_RESET_ARALIGI == 0:
-            baglanti.commit()  # şu ana kadarki başarılı INSERT'leri commit et
-            db._baglanti = None
+            db._baglanti = None          # commit gerekmiyor, sadece tazele
             baglanti = baglan()
             cursor = baglanti.cursor()
 
