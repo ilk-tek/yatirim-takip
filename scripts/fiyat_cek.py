@@ -999,7 +999,6 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
                 fiyat_params = []
                 for satir in fiyat_satirlari:
                     fiyat_params.extend(satir)
-                cursor.execute(fiyat_sql, tuple(fiyat_params))
 
                 # 2) tefas_fon_detay: Multi-VALUES INSERT OR REPLACE
                 detay_placeholder = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(detay_satirlari))
@@ -1012,11 +1011,22 @@ def tefas_fiyatlari_cek(ilerleme_callback=None):
                 detay_params = []
                 for satir in detay_satirlari:
                     detay_params.extend(satir)
-                cursor.execute(detay_sql, tuple(detay_params))
-                # Fonun verisini HEMEN kalıcı yap.
-                # Böylece sonraki 3 sn bekleme + TEFAS isteği sırasında
-                # açık transaction kalmaz, Turso stream'i zaman aşımına düşmez.
-                baglanti.commit()
+
+                # 3) Yaz + commit. Bağlantı boşta kalıp koptuysa
+                #    yeni bağlantı açıp BİR kez daha dene.
+                for deneme in (1, 2):
+                    try:
+                        cursor.execute(fiyat_sql, tuple(fiyat_params))
+                        cursor.execute(detay_sql, tuple(detay_params))
+                        baglanti.commit()   # fonun verisini hemen kalıcı yap
+                        break               # başarılı → denemeyi bitir
+                    except ValueError as e:
+                        if deneme == 2:
+                            raise           # ikinci deneme de olmadıysa hatayı göster
+                        print(f"     🔄 Bağlantı kopmuş, yenileniyor: {e}")
+                        db._baglanti = None          # kopuk bağlantıyı bırak
+                        baglanti = baglan()          # yenisini aç
+                        cursor = baglanti.cursor()
 
             son_tarih = rows[0].get("tarih", "?") if rows else "?"
             basari_listesi.append((kod, eklenen_kayit, son_tarih))
