@@ -18,10 +18,11 @@ def veritabani_baglan():
 # Bu türlerdeki varlıklarda fiyat her zaman 1'dir:
 #   - TL Mevduat: adet = TL tutar, fiyat = 1
 #   - YP Mevduat: adet = YP tutar, fiyat = 1, kur ile TL'ye çevrilir
+#   - DİBS YP: vadeye kadar elde tutulur, piyasa değeri izlenmez
 # fiyat_gecmisi tablosuna kayıt girilmesine gerek yoktur.
 # Kod, bu türlerin fiyatını otomatik olarak 1 kabul eder.
 # ==========================================
-MEVDUAT_TURLERI = ("TL Mevduat", "YP Mevduat")
+MEVDUAT_TURLERI = ("TL Mevduat", "YP Mevduat", "DİBS YP")
 
 
 # ==========================================

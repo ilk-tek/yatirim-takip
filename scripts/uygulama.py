@@ -33,6 +33,15 @@ from fiyat_cek import hisse_fiyatlari_cek, bist_fiyatlari_cek, kripto_fiyatlari_
 from tefas_import import tefas_import
 from kur_guncelle import kur_cek_ve_kaydet
 
+# ==========================================
+# SQL İÇİN MEVDUAT TÜRLERİ LİSTESİ
+# ==========================================
+# MEVDUAT_TURLERI sabitinden SQL'e uygun metin üretir:
+#   'TL Mevduat', 'YP Mevduat', 'DİBS YP'
+# Böylece yeni bir sabit-fiyatlı tür eklendiğinde SQL sorgularını
+# tek tek düzeltmek gerekmez; sadece hesaplamalar.py'deki sabit değişir.
+MEVDUAT_SQL = ", ".join(f"'{t}'" for t in MEVDUAT_TURLERI)
+
 # --- Veritabanı bağlantısı ---
 def veritabani_baglan():
     return baglan()
@@ -232,7 +241,7 @@ if sayfa == "📊 Portföy":
             st.warning("Henüz fiyat girilmemiş. 💱 Fiyat Güncelle sayfasından fiyat girin.")
 
         # --- Fiyat geçmişi eksik varlık uyarısı ---
-        eksik_fiyat = sql_oku("""
+        eksik_fiyat = sql_oku(f"""
             SELECT
                 v.kod, v.tur,
                 MIN(i.tarih) AS ilk_islem,
@@ -244,11 +253,12 @@ if sayfa == "📊 Portföy":
                 FROM islemler WHERE islem_turu IN ('Alış', 'Satış')
                 GROUP BY varlik_id HAVING net > 0
             ) p ON v.id = p.varlik_id
-            WHERE v.tur NOT IN ('TL Mevduat', 'YP Mevduat')
+            WHERE v.tur NOT IN ({MEVDUAT_SQL})
             GROUP BY v.id
         """, veritabani_baglan())
 
         if not eksik_fiyat.empty:
+
             uyarilar = []
             for _, r in eksik_fiyat.iterrows():
                 if r["ilk_fiyat"] is None or pd.isna(r["ilk_fiyat"]):
@@ -381,7 +391,8 @@ if sayfa == "📊 Portföy":
                 "**Maliyet:** FIFO yöntemi, alış tarihindeki döviz kuru ile TL'ye "
                 "çevrilir. **Güncel Değer:** adet × son fiyat × bugünkü kur'dur. "
                 "**TL mevduat** için kâr/zarar her zaman 0'dır. **YP Mevduat** "
-                "satırlarında görünen TL kâr/zarar yalnızca kur farkı kaynaklıdır. "
+                "ve **DİBS YP** satırlarında görünen TL kâr/zarar yalnızca kur farkı "
+                "kaynaklıdır (DİBS kuponları YP Mevduat bakiyesine yansır). "
                 "**📅 Aylık Özet** sayfasında yer alan aylık getiri ise, mevduat "
                 "hesaplarının faiz, komisyon vb. sebeplerle bakiye değişimini "
                 "**net getiri** olarak dikkate almaktadır."
@@ -2879,7 +2890,7 @@ elif sayfa == "➕ Varlık Ekle":
         with col2:
             tur = st.selectbox("Varlık Türü", [
                 "BIST Hisse", "Yabancı Hisse", "Kripto",
-                "TL Mevduat", "YP Mevduat", "Yatırım Fonu",
+                "TL Mevduat", "YP Mevduat", "DİBS YP", "Yatırım Fonu",
                 "BES Fonu", "VIOP", "Forex CFD", "Fiziki Maden"
             ])
             para_birimi = st.selectbox("Para Birimi", ["TRY", "USD", "EUR", "GBP"])
@@ -2934,7 +2945,7 @@ elif sayfa == "✏️ Varlık Düzenle":
 
         tur_listesi = [
             "BIST Hisse", "Yabancı Hisse", "Kripto",
-            "TL Mevduat", "YP Mevduat", "Yatırım Fonu",
+            "TL Mevduat", "YP Mevduat", "DİBS YP", "Yatırım Fonu",
             "BES Fonu", "VIOP", "Forex CFD", "Fiziki Maden"
         ]
 
@@ -4908,8 +4919,15 @@ elif sayfa == "💰 İşlem Ekle":
         is_mevduat_islem   = secilen_tur in MEVDUAT_TURLERI
 
         if is_mevduat_islem:
-            st.info("💡 Mevduat türü varlık — birim fiyat otomatik **1** kabul edilir. "
-                    "**Adet** alanına bakiye tutarını (TL veya YP) girin.")
+            if secilen_tur == "DİBS YP":
+                # DİBS YP: vadeye kadar elde tutulur, fiyat=1 kabul edilir
+                st.info("💡 DİBS YP — birim fiyat otomatik **1** kabul edilir. "
+                        "**Adet** alanına hesaptan çıkan YP tutarını girin. "
+                        "Kuponları bu varlığa değil, paranın yattığı **YP Mevduat** "
+                        "hesabına **Alış** olarak işleyin.")
+            else:
+                st.info("💡 Mevduat türü varlık — birim fiyat otomatik **1** kabul edilir. "
+                        "**Adet** alanına bakiye tutarını (TL veya YP) girin.")
 
         # ==========================================
         # YENİ ARACI KURUM / ETİKET EKLEME (form dışında)
@@ -5621,7 +5639,7 @@ elif sayfa == "💱 Fiyat Güncelle":
         st.info("Henüz varlık eklenmemiş.")
     else:
         # --- Fiyat geçmişi eksik varlık uyarısı ---
-        eksik_fiyat_fg = sql_oku("""
+        eksik_fiyat_fg = sql_oku(f"""
             SELECT
                 v.kod, v.tur,
                 MIN(i.tarih) AS ilk_islem,
@@ -5633,7 +5651,7 @@ elif sayfa == "💱 Fiyat Güncelle":
                 FROM islemler WHERE islem_turu IN ('Alış', 'Satış')
                 GROUP BY varlik_id HAVING net > 0
             ) p ON v.id = p.varlik_id
-            WHERE v.tur NOT IN ('TL Mevduat', 'YP Mevduat')
+            WHERE v.tur NOT IN ({MEVDUAT_SQL})
             GROUP BY v.id
         """, veritabani_baglan())
 
